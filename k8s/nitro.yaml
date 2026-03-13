@@ -1,0 +1,38 @@
+# k8s/nitro.yaml - Rust 加速层部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitro
+  namespace: ai-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nitro
+  template:
+    metadata:
+      labels:
+        app: nitro
+    spec:
+      containers:
+      - name: nitro
+        image: ai-gateway-nitro:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 50052
+        env:
+        - name: RUST_GRPC_PORT
+          value: "50052"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitro-service
+  namespace: ai-gateway
+spec:
+  selector:
+    app: nitro
+  ports:
+    - protocol: TCP
+      port: 50052
+      targetPort: 50052

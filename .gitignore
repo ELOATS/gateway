@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# Go
+**/bin/
+core-go/gateway.exe
+core-go/go.sum.bak
+
+# Rust
+**/target/
+**/target_tmp/
+
+# Python
+**/__pycache__/
+**/.venv/
+logic-python/data/
+.python-version
+
+# Build / IDE
+.vscode/
+.idea/
+*.exe
+*.pdb
+*.d

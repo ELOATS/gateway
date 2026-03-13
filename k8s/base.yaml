@@ -1,0 +1,27 @@
+# k8s/base.yaml - 命名空间、密钥与持久化存储
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-gateway
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gateway-secrets
+  namespace: ai-gateway
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "your-openai-api-key-here" # 请在此处填入真实的 Key
+  GATEWAY_API_KEY: "sk-gw-default-123456"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: intelligence-pvc
+  namespace: ai-gateway
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

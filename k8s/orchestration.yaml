@@ -1,0 +1,54 @@
+# k8s/orchestration.yaml - Go 编排入口层部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestration
+  namespace: ai-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestration
+  template:
+    metadata:
+      labels:
+        app: orchestration
+    spec:
+      containers:
+      - name: orchestration
+        image: ai-gateway-orchestration:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: PYTHON_ADDR
+          value: "intelligence-service:50051"
+        - name: RUST_ADDR
+          value: "nitro-service:50052"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gateway-secrets
+              key: OPENAI_API_KEY
+        - name: GATEWAY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gateway-secrets
+              key: GATEWAY_API_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestration-service
+  namespace: ai-gateway
+spec:
+  type: NodePort
+  selector:
+    app: orchestration
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080

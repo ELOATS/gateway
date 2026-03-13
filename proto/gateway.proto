@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package gateway;
+
+option go_package = "github.com/ai-gateway/core/proto";
+
+service AiLogic {
+  // Input Guardrail: Detect PII and check for prompt injection
+  rpc CheckInput (InputRequest) returns (InputResponse);
+  
+  // Output Guardrail: Detect hallucinations or sensitive data leakage
+  rpc CheckOutput (OutputRequest) returns (OutputResponse);
+
+  // Semantic Cache Check
+  rpc GetCache (CacheRequest) returns (CacheResponse);
+
+  // Token Counting (Nitro)
+  rpc CountTokens (TokenRequest) returns (TokenResponse);
+}
+
+message InputRequest {
+  string prompt = 1;
+  map<string, string> metadata = 2;
+}
+
+message InputResponse {
+  bool safe = 1;
+  string sanitized_prompt = 2;
+  string reason = 3;
+}
+
+message OutputRequest {
+  string response_text = 1;
+}
+
+message OutputResponse {
+  bool safe = 1;
+  string sanitized_text = 2;
+}
+
+message CacheRequest {
+  string prompt = 1;
+}
+
+message CacheResponse {
+  bool hit = 1;
+  string response = 2;
+}
+
+message TokenRequest {
+  string text = 1;
+  string model = 2; // e.g., "gpt-4", "gpt-3.5-turbo"
+}
+
+message TokenResponse {
+  int32 count = 1;
+}

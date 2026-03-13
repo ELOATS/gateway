@@ -1,0 +1,10 @@
+# Ignore everything that shouldn't be in the build context
+**/.venv
+**/target
+**/__pycache__
+**/.git
+logic-python/data/
+core-go/bin/
+.env
+*.exe
+*.pdb

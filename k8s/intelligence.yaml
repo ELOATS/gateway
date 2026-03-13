@@ -1,0 +1,45 @@
+# k8s/intelligence.yaml - Python 智能层部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intelligence
+  namespace: ai-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: intelligence
+  template:
+    metadata:
+      labels:
+        app: intelligence
+    spec:
+      containers:
+      - name: intelligence
+        image: ai-gateway-intelligence:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 50051
+        env:
+        - name: PYTHON_GRPC_PORT
+          value: "50051"
+        volumeMounts:
+        - name: cache-data
+          mountPath: /app/logic-python/data
+      volumes:
+      - name: cache-data
+        persistentVolumeClaim:
+          claimName: intelligence-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: intelligence-service
+  namespace: ai-gateway
+spec:
+  selector:
+    app: intelligence
+  ports:
+    - protocol: TCP
+      port: 50051
+      targetPort: 50051

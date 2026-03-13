@@ -1,0 +1,26 @@
+[project]
+name = "logic-python"
+version = "0.1.0"
+description = "AI Gateway Intelligence Plane"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "grpcio",
+    "grpcio-tools",
+    "python-dotenv",
+    "sentence-transformers",
+    "faiss-cpu",
+    "numpy",
+    "torch", # 显式添加 torch
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
