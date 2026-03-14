@@ -1,0 +1,89 @@
+name: AI Gateway CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  go-ci:
+    name: Go Core (Orchestration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: core-go/go.sum
+
+      - name: Install dependencies
+        run: |
+          cd core-go
+          go mod tidy
+
+      - name: Build
+        run: |
+          cd core-go
+          go build -v ./...
+
+      - name: Test
+        run: |
+          cd core-go
+          go test -v ./...
+
+  rust-ci:
+    name: Rust Utils (Nitro)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: utils-rust -> target
+
+      - name: Build
+        run: |
+          cd utils-rust
+          cargo build --verbose
+
+      - name: Test
+        run: |
+          cd utils-rust
+          cargo test --verbose
+
+  python-ci:
+    name: Python Logic (Intelligence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: "latest"
+
+      - name: Sync environment
+        run: |
+          cd logic-python
+          uv sync
+
+      - name: Verify Import
+        run: |
+          cd logic-python
+          uv run python -c "import main; print('Python module import successful')"

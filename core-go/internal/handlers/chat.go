@@ -10,10 +10,10 @@ import (
 
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
+	"github.com/ai-gateway/core/internal/middleware"
 	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // ChatHandler 处理与聊天补全相关的 HTTP 请求。
@@ -34,7 +34,7 @@ func NewChatHandler(ic pb.AiLogicClient, nc pb.AiLogicClient, sr *router.SmartRo
 
 func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 	start := time.Now()
-	requestID := uuid.New().String()
+	requestID := c.GetString(middleware.RequestIDKey)
 
 	slog.Info("Incoming request", "request_id", requestID, "client_ip", c.ClientIP())
 
@@ -88,8 +88,9 @@ func (h *ChatHandler) asyncCountTokens(rid, text, model string) {
 	}()
 }
 
+// checkCache 尝试从智能层获取语义缓存。
+// 如果命中缓存，它将直接向客户端返回响应并返回 true。
 func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, prompt, model string) bool {
-	// 语义缓存通常应在 500ms 内完成，避免拖慢整体响应。
 	cacheCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
@@ -99,49 +100,51 @@ func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, promp
 		return false
 	}
 
-	if cacheResp.Hit {
-		slog.Info("Cache Hit", "request_id", rid)
-		c.JSON(http.StatusOK, models.ChatCompletionResponse{
-			ID: fmt.Sprintf("cache-%s", rid),
-			Choices: []models.Choice{{
-				Message: models.Message{Role: "assistant", Content: cacheResp.Response},
-			}},
-		})
-		observability.RequestsTotal.WithLabelValues("200_cache", model).Inc()
-		return true
+	if !cacheResp.Hit {
+		return false
 	}
-	return false
+
+	slog.Info("Cache Hit", "request_id", rid)
+	c.JSON(http.StatusOK, models.ChatCompletionResponse{
+		ID: fmt.Sprintf("cache-%s", rid),
+		Choices: []models.Choice{{
+			Message: models.Message{Role: "assistant", Content: cacheResp.Response},
+		}},
+	})
+	observability.RequestsTotal.WithLabelValues("200_cache", model).Inc()
+	return true
 }
 
+// runGuardrails 执行双阶段安全审计：
+// 1. Nitro (Rust): 极速执行正则表达式脱敏 (PII)。
+// 2. Intelligence (Python): 执行深度语义审计（如提示词注入检测）。
 func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, prompt, model string) (string, bool) {
-	// Nitro 加速层 (Rust) 应极快，设为 200ms。
+	// 阶段 1: Nitro 加速层 (Rust) - 侧重性能
 	nitroCtx, cancelNitro := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancelNitro()
-	rsResp, err := h.nitroClient.CheckInput(nitroCtx, &pb.InputRequest{Prompt: prompt})
-	if err == nil {
+	if rsResp, err := h.nitroClient.CheckInput(nitroCtx, &pb.InputRequest{Prompt: prompt}); err == nil {
 		prompt = rsResp.SanitizedPrompt
 	} else {
 		slog.Warn("Nitro guardrail skip due to error", "request_id", rid, "error", err)
 	}
 
-	// Python 智能层审计稍微慢一些，设为 1s。
+	// 阶段 2: Python 智能层 - 侧重深度审计
 	pyCtx, cancelPy := context.WithTimeout(ctx, 1000*time.Millisecond)
 	defer cancelPy()
 	pyResp, err := h.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
 	if err != nil {
 		slog.Error("Intelligence guardrail service error", "request_id", rid, "error", err)
-		// 如果安全审计服务挂了，出于安全考虑，这里可以选择报错或继续。
-		// 目前选择记录错误并继续，但实际生产环境可能需要更严格的策略。
-	} else if !pyResp.Safe {
+		return prompt, true // 降级策略：审计服务故障时允许通过
+	}
+
+	if !pyResp.Safe {
 		slog.Warn("Security Block", "request_id", rid, "reason", pyResp.Reason)
 		c.JSON(http.StatusForbidden, gin.H{"error": "security_block", "reason": pyResp.Reason})
 		observability.RequestsTotal.WithLabelValues("403", model).Inc()
 		return "", false
-	} else {
-		prompt = pyResp.SanitizedPrompt
 	}
 
-	return prompt, true
+	return pyResp.SanitizedPrompt, true
 }
 
 func (h *ChatHandler) routeAndExecute(c *gin.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {

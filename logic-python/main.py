@@ -141,6 +141,15 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
     def GetCache(self, request: gateway_pb2.CacheRequest, 
                  context: grpc.ServicerContext) -> gateway_pb2.CacheResponse:
+        """Searches the semantic cache using vector similarity.
+        
+        Args:
+            request: CacheRequest containing the prompt.
+            context: gRPC context.
+            
+        Returns:
+            CacheResponse with hit status and cached text.
+        """
         rid = get_request_id(context)
         logger.info("[RID:%s] Searching semantic cache", rid)
         
@@ -151,24 +160,31 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
         # Generate embedding OUTSIDE the lock to avoid blocking other requests.
         embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
         
+        # 1. Search in FAISS index.
         with cache_lock:
             if FAISS_INDEX.ntotal > 0:
                 distances, indices = FAISS_INDEX.search(embedding, 1)
+                # L2 Distance threshold: < 0.2 means very high semantic similarity.
                 if distances[0][0] < 0.2:
                     match_idx = indices[0][0]
                     logger.info("[RID:%s] Semantic Cache HIT (Dist: %.4f)", rid, distances[0][0])
                     _, cached_response = CACHE_STORE[match_idx]
                     return gateway_pb2.CacheResponse(hit=True, response=cached_response)
 
-        # Basic logic for mock test if cache is empty.
-        if "what is 1+1" in prompt.lower():
-            self._add_to_cache(prompt, "The answer is 2.")
+        # 2. Mock / Testing Logic (Fallthrough)
+        self._handle_mock_cache(prompt, rid)
 
         logger.info("[RID:%s] Semantic Cache MISS", rid)
         return gateway_pb2.CacheResponse(hit=False)
 
+    def _handle_mock_cache(self, prompt: str, rid: str):
+        """Internal helper for testing/mocking cache entries."""
+        if "what is 1+1" in prompt.lower():
+            logger.info("[RID:%s] Mocking cache entry for '1+1'", rid)
+            self._add_to_cache(prompt, "The answer is 2.")
+
     def _add_to_cache(self, prompt: str, response: str):
-        # Embedding can be done outside.
+        """Adds a new entry to the semantic index and persists to disk."""
         embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
         
         with cache_lock:

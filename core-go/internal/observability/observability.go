@@ -33,6 +33,18 @@ var (
 		Help:    "Request latency",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"model"})
+
+	// AuthTotal counts authentication attempts.
+	AuthTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_auth_total",
+		Help: "Total authentication attempts",
+	}, []string{"status", "reason"})
+
+	// RateLimitedTotal counts requests that were rate limited.
+	RateLimitedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_rate_limited_total",
+		Help: "Total rate limited requests",
+	}, []string{"key_label"})
 )
 
 // InitLogger initializes global JSON logging.
