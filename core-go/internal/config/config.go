@@ -24,6 +24,8 @@ type Config struct {
 	PythonAddr     string        // Python 智能层 gRPC 地址。
 	RustAddr       string        // Rust 加速层 gRPC 地址。
 	OpenAIApiKey   string        // 转发至 OpenAI 所需的 Key。
+	RouteStrategy  string        // 默认路由策略（weighted/cost/latency/quality/fallback）。
+	HealthAlpha    float64       // 健康追踪 EWMA 衰减因子（0.0~1.0）。
 }
 
 // LoadConfig 从环境变量或默认值加载配置。
@@ -34,6 +36,7 @@ func LoadConfig() *Config {
 	rawKeys := getEnv("GATEWAY_API_KEYS", getEnv("GATEWAY_API_KEY", "sk-gw-default-123456"))
 	qps, _ := strconv.ParseFloat(getEnv("RATE_LIMIT_QPS", "100"), 64)
 	burst, _ := strconv.Atoi(getEnv("RATE_LIMIT_BURST", "200"))
+	healthAlpha, _ := strconv.ParseFloat(getEnv("HEALTH_EWMA_ALPHA", "0.3"), 64)
 
 	return &Config{
 		Port:           getEnv("PORT", "8080"),
@@ -43,6 +46,8 @@ func LoadConfig() *Config {
 		PythonAddr:     getEnv("PYTHON_ADDR", "localhost:50051"),
 		RustAddr:       getEnv("RUST_ADDR", "localhost:50052"),
 		OpenAIApiKey:   os.Getenv("OPENAI_API_KEY"),
+		RouteStrategy:  getEnv("ROUTE_STRATEGY", "weighted"),
+		HealthAlpha:    healthAlpha,
 	}
 }
 
