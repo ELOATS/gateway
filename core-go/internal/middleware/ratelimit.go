@@ -10,7 +10,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// RateLimiter returns a gin middleware that limits the request rate globally.
+// RateLimiter 返回一个 Gin 中间件，用于对全球请求速率进行令牌桶限流。
 func RateLimiter(qps float64, burst int) gin.HandlerFunc {
 	limiter := rate.NewLimiter(rate.Limit(qps), burst)
 
@@ -26,11 +26,11 @@ func RateLimiter(qps float64, burst int) gin.HandlerFunc {
 
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":      "rate_limit_exceeded",
-				"message":    "Too many requests, please try again later.",
+				"message":    "请求过于频繁，请稍后再试。",
 				"request_id": rid,
 			})
 
-			// Inform client when they can retry (approximated)
+			// 告知客户端重试时机（近似值）
 			c.Header("Retry-After", strconv.Itoa(int(time.Second/time.Duration(qps))))
 			c.Abort()
 			return

@@ -12,8 +12,8 @@ const (
 	HeaderXRequestID = "X-Request-ID"
 )
 
-// RequestID middleware ensures every request has a unique ID.
-// It checks for an existing X-Request-ID header, otherwise generates a new UUID.
+// RequestID 中间件确保每个请求都拥有唯一的标识 ID。
+// 它会检查请求头中的 X-Request-ID，若不存在则生成一个新的 UUID。
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rid := c.GetHeader(HeaderXRequestID)
@@ -21,10 +21,10 @@ func RequestID() gin.HandlerFunc {
 			rid = uuid.New().String()
 		}
 
-		// Inject into context for handlers to use
+		// 注入上下文供后续 Handler 使用
 		c.Set(RequestIDKey, rid)
 
-		// Set response header
+		// 设置响应头
 		c.Header(HeaderXRequestID, rid)
 
 		c.Next()

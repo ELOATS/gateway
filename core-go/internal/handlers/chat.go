@@ -32,35 +32,42 @@ func NewChatHandler(ic pb.AiLogicClient, nc pb.AiLogicClient, sr *router.SmartRo
 	}
 }
 
+// HandleChatCompletions 处理与聊天补全相关的 HTTP 请求。
 func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 	start := time.Now()
 	requestID := c.GetString(middleware.RequestIDKey)
 
-	slog.Info("Incoming request", "request_id", requestID, "client_ip", c.ClientIP())
+	slog.Info("收到请求", "request_id", requestID, "client_ip", c.ClientIP())
 
+	// 1. 解析请求体
 	var req models.ChatCompletionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		slog.Warn("Invalid payload", "request_id", requestID, "error", err)
+		slog.Warn("无效的请求载荷", "request_id", requestID, "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_payload", "message": err.Error()})
 		return
 	}
 
+	// 2. 初始化上下文（设置超时与追踪 ID）
 	ctx := observability.NewOutContext(c.Request.Context(), requestID)
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
+	// 3. 提取提示词并异步统计 Token
 	prompt := h.extractPrompt(&req)
 	h.asyncCountTokens(requestID, prompt, req.Model)
 
+	// 4. 检查语义缓存：如果命中则直接返回
 	if h.checkCache(c, ctx, requestID, prompt, req.Model) {
 		return
 	}
 
+	// 5. 执行安全审计（双阶段：Rust 初筛 + Python 深钻）
 	finalPrompt, ok := h.runGuardrails(c, ctx, requestID, prompt, req.Model)
 	if !ok {
 		return
 	}
 
+	// 6. 更新请求提示词并执行路由调度
 	if len(req.Messages) > 0 {
 		req.Messages[len(req.Messages)-1].Content = finalPrompt
 	}
@@ -68,6 +75,7 @@ func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 	h.routeAndExecute(c, &req, requestID, start)
 }
 
+// extractPrompt 从请求体中提取最后一条用户消息。
 func (h *ChatHandler) extractPrompt(req *models.ChatCompletionRequest) string {
 	if len(req.Messages) > 0 {
 		return req.Messages[len(req.Messages)-1].Content
@@ -75,6 +83,7 @@ func (h *ChatHandler) extractPrompt(req *models.ChatCompletionRequest) string {
 	return ""
 }
 
+// asyncCountTokens 异步调用 Rust 侧的分词引擎统计 Token 消耗。
 func (h *ChatHandler) asyncCountTokens(rid, text, model string) {
 	go func() {
 		tCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -83,7 +92,7 @@ func (h *ChatHandler) asyncCountTokens(rid, text, model string) {
 		resp, err := h.nitroClient.CountTokens(tCtx, &pb.TokenRequest{Text: text, Model: model})
 		if err == nil {
 			observability.TokenUsage.WithLabelValues(model).Add(float64(resp.Count))
-			slog.Info("Metric recorded", "request_id", rid, "tokens", resp.Count)
+			slog.Info("指标已记录", "request_id", rid, "tokens", resp.Count)
 		}
 	}()
 }
@@ -96,7 +105,7 @@ func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, promp
 
 	cacheResp, err := h.intelligenceClient.GetCache(cacheCtx, &pb.CacheRequest{Prompt: prompt})
 	if err != nil {
-		slog.Warn("Cache service unavailable or timeout", "request_id", rid, "error", err)
+		slog.Warn("缓存服务不可用或超时", "request_id", rid, "error", err)
 		return false
 	}
 
@@ -133,12 +142,12 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 	defer cancelPy()
 	pyResp, err := h.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
 	if err != nil {
-		slog.Error("Intelligence guardrail service error", "request_id", rid, "error", err)
+		slog.Error("智能审计服务异常", "request_id", rid, "error", err)
 		return prompt, true // 降级策略：审计服务故障时允许通过
 	}
 
 	if !pyResp.Safe {
-		slog.Warn("Security Block", "request_id", rid, "reason", pyResp.Reason)
+		slog.Warn("安全拦截", "request_id", rid, "reason", pyResp.Reason)
 		c.JSON(http.StatusForbidden, gin.H{"error": "security_block", "reason": pyResp.Reason})
 		observability.RequestsTotal.WithLabelValues("403", model).Inc()
 		return "", false
@@ -147,13 +156,14 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 	return pyResp.SanitizedPrompt, true
 }
 
+// routeAndExecute 执行动态路由并调用最终的 AI 模型提供商。
 func (h *ChatHandler) routeAndExecute(c *gin.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {
 	nodeName, adapter := h.router.Route()
-	slog.Info("Routing", "request_id", rid, "node", nodeName)
+	slog.Info("路由分配", "request_id", rid, "node", nodeName)
 
 	resp, err := adapter.ChatCompletion(req)
 	if err != nil {
-		slog.Error("Provider error", "request_id", rid, "error", err)
+		slog.Error("供应商调用失败", "request_id", rid, "error", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "provider_error", "message": err.Error()})
 		observability.RequestsTotal.WithLabelValues("502", req.Model).Inc()
 		return
@@ -163,6 +173,6 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, req *models.ChatCompletion
 	observability.Latency.WithLabelValues(req.Model).Observe(duration.Seconds())
 	observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
 
-	slog.Info("Request completed", "request_id", rid, "duration_ms", duration.Milliseconds())
+	slog.Info("请求完成", "request_id", rid, "duration_ms", duration.Milliseconds())
 	c.JSON(http.StatusOK, resp)
 }

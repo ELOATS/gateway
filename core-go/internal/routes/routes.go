@@ -1,4 +1,4 @@
-// Package routes coordinates HTTP endpoints.
+// Package routes 负责协调 HTTP 路由端点。
 package routes
 
 import (
@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// NewRouter 初始化并配置 API 网关的所有 HTTP 路由。
 func NewRouter(h *handlers.ChatHandler, cfg *config.Config) *gin.Engine {
 	r := gin.Default()
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))

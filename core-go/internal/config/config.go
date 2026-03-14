@@ -1,4 +1,4 @@
-// Package config manages system-level settings and environment variables.
+// Package config 管理系统级别的设置和环境变量。
 package config
 
 import (
@@ -9,10 +9,10 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// APIKeyEntry represents a single authorized API key with an optional label.
+// APIKeyEntry 表示一个经过授权的 API Key 及其关联的标签（Label）。
 type APIKeyEntry struct {
-	Key   string
-	Label string
+	Key   string // API Key 字符串。
+	Label string // 用于标识调用方（如 admin, user1）的标签。
 }
 
 // Config 存储网关的所有全局配置。
