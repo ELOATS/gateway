@@ -1,4 +1,4 @@
-// Package adapters provides implementations for different AI service providers.
+// Package adapters 提供各种 AI 服务供应商的对接实现。
 package adapters
 
 import (
@@ -38,6 +38,7 @@ func NewOpenAIAdapter(apiKey string) *OpenAIAdapter {
 	}
 }
 
+// ChatCompletion 执行向 OpenAI API 的聊天补全请求。
 func (a *OpenAIAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	url := "https://api.openai.com/v1/chat/completions"
 	data, err := json.Marshal(req)
@@ -75,6 +76,7 @@ type MockAdapter struct {
 	Name string
 }
 
+// ChatCompletion 模拟 AI 响应，用于本地开发与压测场景。
 func (a *MockAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	return &models.ChatCompletionResponse{
 		ID:      fmt.Sprintf("mock-%s-%d", a.Name, time.Now().Unix()),

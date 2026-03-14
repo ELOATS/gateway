@@ -49,27 +49,28 @@ cache_lock = threading.Lock()
 
 
 def load_cache():
-    """Loads cache from disk if it exists."""
+    """从磁盘加载持久化缓存（如果存在）。"""
     global FAISS_INDEX, CACHE_STORE
-    with cache_lock:
-        if not os.path.exists(CACHE_DIR):
-            os.makedirs(CACHE_DIR)
-            return
+    
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+        return
 
-        if os.path.exists(INDEX_PATH) and os.path.exists(STORE_PATH):
-            try:
-                FAISS_INDEX = faiss.read_index(INDEX_PATH)
-                with open(STORE_PATH, 'r', encoding='utf-8') as f:
-                    CACHE_STORE = [tuple(item) for item in json.load(f)]
-                logger.info("Loaded %d items from persistent cache", len(CACHE_STORE))
-            except Exception as e:
-                logger.error("Failed to load cache: %s", e)
+    if not (os.path.exists(INDEX_PATH) and os.path.exists(STORE_PATH)):
+        return
+
+    with cache_lock:
+        try:
+            FAISS_INDEX = faiss.read_index(INDEX_PATH)
+            with open(STORE_PATH, 'r', encoding='utf-8') as f:
+                CACHE_STORE = [tuple(item) for item in json.load(f)]
+            logger.info("已从磁盘加载 %d 条缓存记录", len(CACHE_STORE))
+        except Exception as e:
+            logger.error("加载缓存失败: %s", e)
 
 
 def save_cache():
-    """Saves cache to disk. Assumes caller might hold lock, 
-    but we use it here to ensure consistency if called directly.
-    """
+    """将缓存持久化到磁盘。"""
     with cache_lock:
         if not os.path.exists(CACHE_DIR):
             os.makedirs(CACHE_DIR)
@@ -77,9 +78,9 @@ def save_cache():
             faiss.write_index(FAISS_INDEX, INDEX_PATH)
             with open(STORE_PATH, 'w', encoding='utf-8') as f:
                 json.dump(CACHE_STORE, f, ensure_ascii=False, indent=2)
-            logger.info("Saved cache to disk (%d items)", len(CACHE_STORE))
+            logger.info("已将缓存保存到磁盘（共 %d 条）", len(CACHE_STORE))
         except Exception as e:
-            logger.error("Failed to save cache: %s", e)
+            logger.error("保存缓存失败: %s", e)
 
 
 def get_request_id(context: grpc.ServicerContext) -> str:
@@ -100,8 +101,9 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
     def CheckInput(self, request: gateway_pb2.InputRequest, 
                    context: grpc.ServicerContext) -> gateway_pb2.InputResponse:
+        """检查输入安全性并执行脱敏。"""
         rid = get_request_id(context)
-        logger.info("[RID:%s] Checking input safety", rid)
+        logger.info("[RID:%s] 正在执行输入安全审计", rid)
         
         prompt = request.prompt
         sanitized = prompt
@@ -113,7 +115,7 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
         block_reason = ""
         if "ignore all previous instructions" in prompt.lower():
             is_safe = False
-            block_reason = "Security: Potential prompt injection detected."
+            block_reason = "安全拦截：检测到潜在的提示词注入攻击。"
 
         return gateway_pb2.InputResponse(
             safe=is_safe,
@@ -123,8 +125,9 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
     def CheckOutput(self, request: gateway_pb2.OutputRequest, 
                     context: grpc.ServicerContext) -> gateway_pb2.OutputResponse:
+        """检查响应内容的安全性（如幻觉检测）。"""
         rid = get_request_id(context)
-        logger.info("[RID:%s] Checking output for hallucinations", rid)
+        logger.info("[RID:%s] 正在执行输出内容审计", rid)
         
         text = request.response_text
         is_safe = True
@@ -132,7 +135,7 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
         if "contradictory" in text.lower():
             is_safe = False
-            sanitized_text = "[CONTENT BLOCKED: Potential Hallucination]"
+            sanitized_text = "[内容拦截：检测到潜在的逻辑自相矛盾/幻觉]"
 
         return gateway_pb2.OutputResponse(
             safe=is_safe,
@@ -141,69 +144,63 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
     def GetCache(self, request: gateway_pb2.CacheRequest, 
                  context: grpc.ServicerContext) -> gateway_pb2.CacheResponse:
-        """Searches the semantic cache using vector similarity.
-        
-        Args:
-            request: CacheRequest containing the prompt.
-            context: gRPC context.
-            
-        Returns:
-            CacheResponse with hit status and cached text.
-        """
+        """使用向量相似度执行语义缓存搜索。"""
         rid = get_request_id(context)
-        logger.info("[RID:%s] Searching semantic cache", rid)
+        logger.info("[RID:%s] 正在搜索语义缓存", rid)
         
         prompt = request.prompt
         if not prompt:
             return gateway_pb2.CacheResponse(hit=False)
 
-        # Generate embedding OUTSIDE the lock to avoid blocking other requests.
+        # 在锁外部生成 Embedding，避免阻塞其他请求
         embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
         
-        # 1. Search in FAISS index.
+        # 1. 在 FAISS 索引中搜索
         with cache_lock:
-            if FAISS_INDEX.ntotal > 0:
+            if FAISS_INDEX.ntotal == 0:
+                pass # 后续进入模拟逻辑
+            else:
                 distances, indices = FAISS_INDEX.search(embedding, 1)
-                # L2 Distance threshold: < 0.2 means very high semantic similarity.
+                # L2 距离阈值：< 0.2 表示语义极度相似
                 if distances[0][0] < 0.2:
                     match_idx = indices[0][0]
-                    logger.info("[RID:%s] Semantic Cache HIT (Dist: %.4f)", rid, distances[0][0])
+                    logger.info("[RID:%s] 语义缓存命中 (距离: %.4f)", rid, distances[0][0])
                     _, cached_response = CACHE_STORE[match_idx]
                     return gateway_pb2.CacheResponse(hit=True, response=cached_response)
 
-        # 2. Mock / Testing Logic (Fallthrough)
+        # 2. 模拟/测试逻辑
         self._handle_mock_cache(prompt, rid)
 
-        logger.info("[RID:%s] Semantic Cache MISS", rid)
+        logger.info("[RID:%s] 语义缓存未命中", rid)
         return gateway_pb2.CacheResponse(hit=False)
 
     def _handle_mock_cache(self, prompt: str, rid: str):
-        """Internal helper for testing/mocking cache entries."""
+        """处理模拟/测试用的缓存项。"""
         if "what is 1+1" in prompt.lower():
-            logger.info("[RID:%s] Mocking cache entry for '1+1'", rid)
-            self._add_to_cache(prompt, "The answer is 2.")
+            logger.info("[RID:%s] 正在为 '1+1' 构建模拟缓存响应", rid)
+            self._add_to_cache(prompt, "答案是 2。")
 
     def _add_to_cache(self, prompt: str, response: str):
-        """Adds a new entry to the semantic index and persists to disk."""
+        """将新条目添加到语义索引并持久化到磁盘。"""
         embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
         
         with cache_lock:
             FAISS_INDEX.add(embedding)
             CACHE_STORE.append((prompt, response))
         
-        # Save to disk. save_cache handles its own locking.
+        # 保存到磁盘。save_cache 内部会处理锁。
         save_cache()
 
 
 def serve():
-    """Starts the gRPC server."""
+    """启动 gRPC 服务器。"""
     load_cache()
-    # Read port from .env or default to 50051.
+    # 从环境变量读取端口，默认为 50051
     port = os.getenv("PYTHON_GRPC_PORT", os.getenv("GRPC_PORT", "50051"))
     server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=10))
     gateway_pb2_grpc.add_AiLogicServicer_to_server(AiLogicServicer(), server)
     server.add_insecure_port(f'[::]:{port}')
-    logger.info("AI Intelligence Service listening on port %s", port)
+    logger.info("AI 智能审计服务 (Python) 已启动，监听端口: %s", port)
     server.start()
     server.wait_for_termination()
 

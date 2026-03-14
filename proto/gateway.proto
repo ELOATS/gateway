@@ -2,56 +2,69 @@ syntax = "proto3";
 
 package gateway;
 
+// go_package 定义了生成的 Go 代码的包路径。
 option go_package = "github.com/ai-gateway/core/proto";
 
+// AiLogic 定义了 AI 网关与周边智能/加速层之间的核心通信接口。
 service AiLogic {
-  // Input Guardrail: Detect PII and check for prompt injection
+  // CheckInput 执行输入侧的安全审计与脱敏。
+  // 负责 PII（敏感个人信息）识别、提示词注入（Prompt Injection）检测等功能。
   rpc CheckInput (InputRequest) returns (InputResponse);
   
-  // Output Guardrail: Detect hallucinations or sensitive data leakage
+  // CheckOutput 执行输出侧的安全审计与内容合规检查。
+  // 用于识别潜在的 AI 幻觉、敏感信息泄露或违反内容策略的响应。
   rpc CheckOutput (OutputRequest) returns (OutputResponse);
 
-  // Semantic Cache Check
+  // GetCache 语义级缓存检查。
+  // 基于向量相似度匹配，返回最接近的历史回答以降低消耗并提升响应速度。
   rpc GetCache (CacheRequest) returns (CacheResponse);
 
-  // Token Counting (Nitro)
+  // CountTokens 统计请求或响应的 Token 消耗（由 Rust 侧 Nitro 引擎提供支持）。
   rpc CountTokens (TokenRequest) returns (TokenResponse);
 }
 
+// InputRequest 输入安全审计请求。
 message InputRequest {
-  string prompt = 1;
-  map<string, string> metadata = 2;
+  string prompt = 1;                // 待审计的原始提示词内容。
+  map<string, string> metadata = 2; // 可选的元数据，用于透传流量来源、用户 ID 等上下文。
 }
 
+// InputResponse 输入安全审计响应。
 message InputResponse {
-  bool safe = 1;
-  string sanitized_prompt = 2;
-  string reason = 3;
+  bool safe = 1;               // 审计是否通过。
+  string sanitized_prompt = 2; // 脱敏或修复后的提示词（若未通过审计，此字段可能为空）。
+  string reason = 3;           // 拦截原因（如果 safe 为 false）。
 }
 
+// OutputRequest 输出内容审计请求。
 message OutputRequest {
-  string response_text = 1;
+  string response_text = 1;    // AI 生成的原始回答文本。
 }
 
+// OutputResponse 输出内容审计响应。
 message OutputResponse {
-  bool safe = 1;
-  string sanitized_text = 2;
+  bool safe = 1;            // 响应内容是否合规、可靠。
+  string sanitized_text = 2; // 经过修剪或掩码处理后的最终文本。
 }
 
+// CacheRequest 语义缓存查询请求。
 message CacheRequest {
-  string prompt = 1;
+  string prompt = 1; // 当前请求的提示词，用于计算向量相似度。
 }
 
+// CacheResponse 语义缓存查询结果。
 message CacheResponse {
-  bool hit = 1;
-  string response = 2;
+  bool hit = 1;        // 是否命中缓存。
+  string response = 2; // 缓存的回答内容（仅当 hit 为 true 时有效）。
 }
 
+// TokenRequest Token 统计请求。
 message TokenRequest {
-  string text = 1;
-  string model = 2; // e.g., "gpt-4", "gpt-3.5-turbo"
+  string text = 1;  // 需要统计的文本内容。
+  string model = 2; // 统计所参照的模型家族（例如 "gpt-4", "gpt-3.5-turbo"）。
 }
 
+// TokenResponse Token 统计结果。
 message TokenResponse {
-  int32 count = 1;
+  int32 count = 1; // 计算出的 Token 数量。
 }

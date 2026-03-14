@@ -1,28 +1,28 @@
-// Package models provides the shared data structures for the AI Gateway.
+// Package models 提供 AI 网关通用的数据结构模型。
 package models
 
-// ChatCompletionRequest represents the standard OpenAI chat request.
+// ChatCompletionRequest 表示标准 OpenAI 聊天补全请求。
 type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature,omitempty"`
-	Stream      bool      `json:"stream,omitempty"`
+	Model       string    `json:"model"`       // 使用的模型名称。
+	Messages    []Message `json:"messages"`    // 聊天消息列表。
+	Temperature float64   `json:"temperature,omitempty"` // 采样温度。
+	Stream      bool      `json:"stream,omitempty"`      // 是否开启流式响应。
 }
 
-// Message represents a single message in a chat conversation.
+// Message 表示聊天对话中的单条消息。
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string `json:"role"`    // 角色（system, user, assistant）。
+	Content string `json:"content"` // 消息内容。
 }
 
-// ChatCompletionResponse represents the standard OpenAI chat response.
+// ChatCompletionResponse 表示标准 OpenAI 聊天补全响应。
 type ChatCompletionResponse struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+	ID      string   `json:"id"`      // 请求唯一标识。
+	Object  string   `json:"object"`  // 对象类型（如 chat.completion）。
+	Created int64    `json:"created"` // 创建时间戳。
+	Model   string   `json:"model"`   // 使用的模型名称。
+	Choices []Choice `json:"choices"` // 补全选项列表。
+	Usage   Usage    `json:"usage"`   // Token 消耗详情。
 }
 
 // Choice represents a single completion choice.
