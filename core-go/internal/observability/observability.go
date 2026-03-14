@@ -45,6 +45,19 @@ var (
 		Name: "gateway_rate_limited_total",
 		Help: "被限流的请求总数",
 	}, []string{"key_label"})
+
+	// RouteDecisions 统计路由决策次数（按策略和目标节点）。
+	RouteDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_route_decisions_total",
+		Help: "路由决策总数",
+	}, []string{"strategy", "node"})
+
+	// NodeLatency 记录每个节点的调用延迟分布。
+	NodeLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gateway_node_latency_seconds",
+		Help:    "每个节点的调用延迟",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"node"})
 )
 
 // InitLogger 初始化全局 JSON 结构化日志。

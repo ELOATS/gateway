@@ -156,23 +156,51 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 	return pyResp.SanitizedPrompt, true
 }
 
-// routeAndExecute 执行动态路由并调用最终的 AI 模型提供商。
+// routeAndExecute 执行智能路由并调用最终的 AI 模型提供商。
+// 路由结果会被反馈到 HealthTracker 以更新节点健康状态。
 func (h *ChatHandler) routeAndExecute(c *gin.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {
-	nodeName, adapter := h.router.Route()
-	slog.Info("路由分配", "request_id", rid, "node", nodeName)
+	// 构造路由上下文。
+	routeCtx := &router.RouteContext{
+		RequestID:    rid,
+		Model:        req.Model,
+		PromptTokens: len(h.extractPrompt(req)) / 4, // 粗略估算：4 字符 ≈ 1 token。
+		UserTier:     c.GetString("key_label"),
+		Headers: map[string]string{
+			"X-Route-Strategy": c.GetHeader("X-Route-Strategy"),
+		},
+	}
 
-	resp, err := adapter.ChatCompletion(req)
+	node, err := h.router.Route(routeCtx)
 	if err != nil {
-		slog.Error("供应商调用失败", "request_id", rid, "error", err)
+		slog.Error("路由失败", "request_id", rid, "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "routing_error", "message": err.Error()})
+		observability.RequestsTotal.WithLabelValues("503", req.Model).Inc()
+		return
+	}
+
+	slog.Info("路由分配", "request_id", rid, "node", node.Name, "model_id", node.ModelID)
+
+	// 执行调用并记录健康数据。
+	callStart := time.Now()
+	resp, err := node.Adapter.ChatCompletion(req)
+	callDuration := time.Since(callStart)
+
+	if err != nil {
+		h.router.Tracker.RecordFailure(node.Name)
+		slog.Error("供应商调用失败", "request_id", rid, "node", node.Name, "error", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "provider_error", "message": err.Error()})
 		observability.RequestsTotal.WithLabelValues("502", req.Model).Inc()
 		return
 	}
 
+	// 记录成功调用的延迟到健康追踪器。
+	h.router.Tracker.RecordSuccess(node.Name, callDuration)
+
 	duration := time.Since(start)
 	observability.Latency.WithLabelValues(req.Model).Observe(duration.Seconds())
+	observability.NodeLatency.WithLabelValues(node.Name).Observe(callDuration.Seconds())
 	observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
 
-	slog.Info("请求完成", "request_id", rid, "duration_ms", duration.Milliseconds())
+	slog.Info("请求完成", "request_id", rid, "node", node.Name, "duration_ms", duration.Milliseconds())
 	c.JSON(http.StatusOK, resp)
 }
