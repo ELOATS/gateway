@@ -59,9 +59,13 @@ func main() {
 	sr := router.NewSmartRouter(candidates)
 	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr)
 
-	engine := routes.NewRouter(chatHandler, cfg.GatewayApiKey)
+	engine := routes.NewRouter(chatHandler, cfg)
 
-	slog.Info("AI Gateway Core is ready", "addr", ":"+cfg.Port)
+	slog.Info("AI Gateway Core is ready", 
+		"addr", ":"+cfg.Port, 
+		"keys_loaded", len(cfg.APIKeys),
+		"ratelimit_qps", cfg.RateLimitQPS,
+	)
 	if err := engine.Run(":" + cfg.Port); err != nil {
 		log.Fatalf("Fatal: server failed: %v", err)
 	}

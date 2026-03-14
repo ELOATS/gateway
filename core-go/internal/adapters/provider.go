@@ -57,7 +57,7 @@ func (a *OpenAIAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mode
 		return nil, fmt.Errorf("execute request: %w", err)
 	}
 	defer resp.Body.Close()
-...
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("openai error (status %d): %s", resp.StatusCode, string(body))

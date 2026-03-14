@@ -53,9 +53,9 @@ impl AiLogic for MyAiLogic {
         
         log::info!("[RID:{}] Nitro Plane: Masking PII", rid);
 
-        // 使用 COW (Copy-On-Write) 优化替换，如果无替换则不产生分配
-        let sanitized = RE_EMAIL
-            .replace_all(&req.prompt, "[PII_EMAIL_MASKED]");
+        // Regex masking using Global Static Regex (Lazy compiled).
+        // Uses COW (Copy-On-Write) to avoid unnecessary memory allocation if no match is found.
+        let sanitized = RE_EMAIL.replace_all(&req.prompt, "[PII_EMAIL_MASKED]");
 
         Ok(Response::new(InputResponse {
             safe: true,
@@ -72,17 +72,22 @@ impl AiLogic for MyAiLogic {
         let req = request.into_inner();
         let model_name = req.model.to_lowercase();
 
-        let count = if model_name.contains("gpt-4") || model_name.contains("3.5-turbo") {
-            let bpe = cl100k_base().map_err(|e| Status::internal(e.to_string()))?;
-            bpe.encode_with_special_tokens(&req.text).len()
+        // Select the appropriate BPE (Byte Pair Encoding) base based on the model family.
+        let bpe_res = if model_name.contains("gpt-4") || model_name.contains("3.5-turbo") {
+            cl100k_base()
         } else if model_name.contains("davinci") {
-            let bpe = p50k_base().map_err(|e| Status::internal(e.to_string()))?;
-            bpe.encode_with_special_tokens(&req.text).len()
+            p50k_base()
         } else {
-            let bpe = r50k_base().map_err(|e| Status::internal(e.to_string()))?;
-            bpe.encode_with_special_tokens(&req.text).len()
+            // Default fallback for unknown models.
+            r50k_base()
         };
 
+        let bpe = bpe_res.map_err(|e| {
+            log::error!("[RID:{}] BPE Initialization failed: {}", rid, e);
+            Status::internal("Failed to initialize tokenizer")
+        })?;
+
+        let count = bpe.encode_with_special_tokens(&req.text).len();
         log::info!("[RID:{}] Nitro Plane: Token count: {}", rid, count);
 
         Ok(Response::new(TokenResponse {
