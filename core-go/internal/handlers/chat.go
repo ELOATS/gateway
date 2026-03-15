@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ai-gateway/core/internal/config"
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
 	"github.com/ai-gateway/core/internal/middleware"
@@ -21,14 +22,16 @@ type ChatHandler struct {
 	intelligenceClient pb.AiLogicClient
 	nitroClient        pb.AiLogicClient
 	router             *router.SmartRouter
+	config             *config.Config
 }
 
 // NewChatHandler 创建一个包含所需依赖的 ChatHandler 实例。
-func NewChatHandler(ic pb.AiLogicClient, nc pb.AiLogicClient, sr *router.SmartRouter) *ChatHandler {
+func NewChatHandler(ic pb.AiLogicClient, nc pb.AiLogicClient, sr *router.SmartRouter, cfg *config.Config) *ChatHandler {
 	return &ChatHandler{
 		intelligenceClient: ic,
 		nitroClient:        nc,
 		router:             sr,
+		config:             cfg,
 	}
 }
 
@@ -49,7 +52,7 @@ func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 
 	// 2. 初始化上下文（设置超时与追踪 ID）
 	ctx := observability.NewOutContext(c.Request.Context(), requestID)
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, h.config.RequestTimeout)
 	defer cancel()
 
 	// 3. 提取提示词并异步统计 Token
@@ -86,7 +89,7 @@ func (h *ChatHandler) extractPrompt(req *models.ChatCompletionRequest) string {
 // asyncCountTokens 异步调用 Rust 侧的分词引擎统计 Token 消耗。
 func (h *ChatHandler) asyncCountTokens(rid, text, model string) {
 	go func() {
-		tCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		tCtx, cancel := context.WithTimeout(context.Background(), h.config.TokenCountTimeout)
 		defer cancel()
 		tCtx = observability.NewOutContext(tCtx, rid)
 		resp, err := h.nitroClient.CountTokens(tCtx, &pb.TokenRequest{Text: text, Model: model})
@@ -100,7 +103,7 @@ func (h *ChatHandler) asyncCountTokens(rid, text, model string) {
 // checkCache 尝试从智能层获取语义缓存。
 // 如果命中缓存，它将直接向客户端返回响应并返回 true。
 func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, prompt, model string) bool {
-	cacheCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	cacheCtx, cancel := context.WithTimeout(ctx, h.config.CacheTimeout)
 	defer cancel()
 
 	cacheResp, err := h.intelligenceClient.GetCache(cacheCtx, &pb.CacheRequest{Prompt: prompt})
@@ -129,7 +132,7 @@ func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, promp
 // 2. Intelligence (Python): 执行深度语义审计（如提示词注入检测）。
 func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, prompt, model string) (string, bool) {
 	// 阶段 1: Nitro 加速层 (Rust) - 侧重性能
-	nitroCtx, cancelNitro := context.WithTimeout(ctx, 200*time.Millisecond)
+	nitroCtx, cancelNitro := context.WithTimeout(ctx, h.config.GuardrailNitroTimeout)
 	defer cancelNitro()
 	if rsResp, err := h.nitroClient.CheckInput(nitroCtx, &pb.InputRequest{Prompt: prompt}); err == nil {
 		prompt = rsResp.SanitizedPrompt
@@ -138,7 +141,7 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 	}
 
 	// 阶段 2: Python 智能层 - 侧重深度审计
-	pyCtx, cancelPy := context.WithTimeout(ctx, 1000*time.Millisecond)
+	pyCtx, cancelPy := context.WithTimeout(ctx, h.config.GuardrailIntellTimeout)
 	defer cancelPy()
 	pyResp, err := h.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
 	if err != nil {
@@ -163,7 +166,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, req *models.ChatCompletion
 	routeCtx := &router.RouteContext{
 		RequestID:    rid,
 		Model:        req.Model,
-		PromptTokens: len(h.extractPrompt(req)) / 4, // 粗略估算：4 字符 ≈ 1 token。
+		PromptTokens: len(h.extractPrompt(req)) / h.config.TokenEstimationFactor, // 粗略估算。
 		UserTier:     c.GetString("key_label"),
 		Headers: map[string]string{
 			"X-Route-Strategy": c.GetHeader("X-Route-Strategy"),

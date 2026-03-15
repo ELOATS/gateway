@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -17,26 +18,48 @@ type APIKeyEntry struct {
 
 // Config 存储网关的所有全局配置。
 type Config struct {
-	Port           string        // 网关 HTTP 监听端口。
+	// 基础网络配置
+	Port string // 网关 HTTP 监听端口。
+
+	// 业务逻辑配置
 	APIKeys        []APIKeyEntry // 支持多 API Key 校验。
 	RateLimitQPS   float64       // 每秒请求数限制。
 	RateLimitBurst int           // 令牌桶突发容量。
 	PythonAddr     string        // Python 智能层 gRPC 地址。
 	RustAddr       string        // Rust 加速层 gRPC 地址。
-	OpenAIApiKey   string        // 转发至 OpenAI 所需的 Key。
 	RouteStrategy  string        // 默认路由策略（weighted/cost/latency/quality/fallback）。
 	HealthAlpha    float64       // 健康追踪 EWMA 衰减因子（0.0~1.0）。
+
+	// 外部供应商配置
+	OpenAIApiKey string        // 转发至 OpenAI 所需的 Key。
+	OpenAIURL    string        // OpenAI API 基础地址。
+	OpenAITimeout time.Duration // OpenAI 调用超时。
+
+	// 细粒度超时控制 (Duration)
+	RequestTimeout      time.Duration // 整体请求最大耗时。
+	TokenCountTimeout   time.Duration // Token 统计调用超时。
+	CacheTimeout        time.Duration // 缓存查询超时。
+	GuardrailNitroTimeout time.Duration // Nitro 审计超时。
+	GuardrailIntellTimeout time.Duration // 智能审计超时。
+
+	// gRPC 策略
+	GRPCBaseDelay time.Duration // gRPC 重试基础延迟。
+	GRPCMaxDelay  time.Duration // gRPC 重试最大延迟。
+
+	// 算法参数
+	TokenEstimationFactor int // 字符转 Token 估算系数。
 }
 
 // LoadConfig 从环境变量或默认值加载配置。
 func LoadConfig() *Config {
-	// 尝试从项目根目录（向上两级）或当前目录加载 .env
+	// 尝试加载 .env
 	_ = godotenv.Load("../../.env", "../.env", ".env")
 
 	rawKeys := getEnv("GATEWAY_API_KEYS", getEnv("GATEWAY_API_KEY", "sk-gw-default-123456"))
 	qps, _ := strconv.ParseFloat(getEnv("RATE_LIMIT_QPS", "100"), 64)
 	burst, _ := strconv.Atoi(getEnv("RATE_LIMIT_BURST", "200"))
 	healthAlpha, _ := strconv.ParseFloat(getEnv("HEALTH_EWMA_ALPHA", "0.3"), 64)
+	tokenFactor, _ := strconv.Atoi(getEnv("TOKEN_ESTIMATION_FACTOR", "4"))
 
 	return &Config{
 		Port:           getEnv("PORT", "8080"),
@@ -48,7 +71,34 @@ func LoadConfig() *Config {
 		OpenAIApiKey:   os.Getenv("OPENAI_API_KEY"),
 		RouteStrategy:  getEnv("ROUTE_STRATEGY", "weighted"),
 		HealthAlpha:    healthAlpha,
+
+		OpenAIURL:     getEnv("OPENAI_URL", "https://api.openai.com/v1/chat/completions"),
+		OpenAITimeout: getDuration("OPENAI_TIMEOUT", 30*time.Second),
+
+		RequestTimeout:      getDuration("REQUEST_TIMEOUT", 15*time.Second),
+		TokenCountTimeout:   getDuration("TOKEN_COUNT_TIMEOUT", 2*time.Second),
+		CacheTimeout:        getDuration("CACHE_TIMEOUT", 500*time.Millisecond),
+		GuardrailNitroTimeout: getDuration("GUARDRAIL_NITRO_TIMEOUT", 200*time.Millisecond),
+		GuardrailIntellTimeout: getDuration("GUARDRAIL_INTELL_TIMEOUT", 1000*time.Millisecond),
+
+		GRPCBaseDelay: getDuration("GRPC_BASE_DELAY", 1*time.Second),
+		GRPCMaxDelay:  getDuration("GRPC_MAX_DELAY", 10*time.Second),
+
+		TokenEstimationFactor: tokenFactor,
 	}
+}
+
+// getDuration 从环境变量解析持续时间，解析失败返回默认值。
+func getDuration(key string, fallback time.Duration) time.Duration {
+	val := os.Getenv(key)
+	if val == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 // ParseAPIKeys 解析逗号分隔的 key:label 格式。
