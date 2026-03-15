@@ -19,16 +19,20 @@ type Provider interface {
 
 // OpenAIAdapter 是用于调用 OpenAI 官方 API 的适配器。
 type OpenAIAdapter struct {
-	APIKey string
-	Client *http.Client
+	APIKey  string
+	URL     string
+	Timeout time.Duration
+	Client  *http.Client
 }
 
-// NewOpenAIAdapter 创建一个新的 OpenAI 适配器，并初始化复用的 HTTP 客户端。
-func NewOpenAIAdapter(apiKey string) *OpenAIAdapter {
+// NewOpenAIAdapter 创建一个新的 OpenAI 适配器，配置由外部传入。
+func NewOpenAIAdapter(apiKey, url string, timeout time.Duration) *OpenAIAdapter {
 	return &OpenAIAdapter{
-		APIKey: apiKey,
+		APIKey:  apiKey,
+		URL:     url,
+		Timeout: timeout,
 		Client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: timeout,
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				IdleConnTimeout:     90 * time.Second,
@@ -40,13 +44,12 @@ func NewOpenAIAdapter(apiKey string) *OpenAIAdapter {
 
 // ChatCompletion 执行向 OpenAI API 的聊天补全请求。
 func (a *OpenAIAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
-	url := "https://api.openai.com/v1/chat/completions"
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
+	httpReq, err := http.NewRequest("POST", a.URL, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -61,7 +64,7 @@ func (a *OpenAIAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mode
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("openai error (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("provider error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var result models.ChatCompletionResponse

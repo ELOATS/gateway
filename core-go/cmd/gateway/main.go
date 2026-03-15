@@ -4,7 +4,6 @@ package main
 import (
 	"log"
 	"log/slog"
-	"time"
 
 	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/adapters"
@@ -26,13 +25,13 @@ func main() {
 	observability.InitLogger()
 	slog.Info("正在初始化 AI 网关核心", "port", cfg.Port)
 
-	// gRPC 连接选项：配置不安全凭据（内部网络使用）与自适应补偿重试（Backoff）。
+	// gRPC 连接选项：配置不安全凭据与自适应补偿重试。
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: backoff.Config{
-				BaseDelay: 1 * time.Second,
-				MaxDelay:  10 * time.Second,
+				BaseDelay: cfg.GRPCBaseDelay,
+				MaxDelay:  cfg.GRPCMaxDelay,
 			},
 		}),
 	}
@@ -44,48 +43,78 @@ func main() {
 	nitroClient, rsConn := mustDial(cfg.RustAddr, dialOpts...)
 	defer rsConn.Close()
 
-	// 4. 构建模型节点注册表：
-	var nodes []*router.ModelNode
+	// 4. 初始化核心路由组件：
+	nodes := initNodes(cfg)
+	sr, _ := initSmartRouter(cfg, nodes)
+
+	slog.Info("智能路由引擎就绪",
+		"default_strategy", cfg.RouteStrategy,
+		"nodes_registered", len(nodes),
+		"strategies_registered", 6,
+	)
+
+	// 5. 初始化业务组件与 HTTP 服务：
+	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, cfg)
+	engine := routes.NewRouter(chatHandler, cfg)
+
+	// 6. 启动服务：
+	slog.Info("AI 网关核心服务已就绪",
+		"addr", ":"+cfg.Port,
+		"keys_loaded", len(cfg.APIKeys),
+		"ratelimit_qps", cfg.RateLimitQPS,
+	)
+	if err := engine.Run(":" + cfg.Port); err != nil {
+		log.Fatalf("致命错误: 服务器启动失败: %v", err)
+	}
+}
+
+// initNodes 根据配置初始化模型节点。
+func initNodes(cfg *config.Config) []*router.ModelNode {
 	if cfg.OpenAIApiKey != "" && cfg.OpenAIApiKey != "your-openai-api-key-here" {
-		nodes = append(nodes, &router.ModelNode{
-			Name:      "OpenAI-主节点",
-			ModelID:   "gpt-4",
-			Adapter:   adapters.NewOpenAIAdapter(cfg.OpenAIApiKey),
-			Weight:    100,
-			CostPer1K: 0.03,
-			Quality:   0.95,
-			Tags:      map[string]string{"tier": "premium", "provider": "openai"},
-			Enabled:   true,
-		})
 		slog.Info("已注册 OpenAI 真实适配器", "model_id", "gpt-4")
-	} else {
-		nodes = []*router.ModelNode{
+		return []*router.ModelNode{
 			{
-				Name: "主模拟节点", ModelID: "mock-primary",
-				Adapter: &adapters.MockAdapter{Name: "Primary"}, Weight: 80,
-				CostPer1K: 0.001, Quality: 0.7,
-				Tags: map[string]string{"tier": "standard"}, Enabled: true,
-			},
-			{
-				Name: "备用模拟节点", ModelID: "mock-secondary",
-				Adapter: &adapters.MockAdapter{Name: "Secondary"}, Weight: 20,
-				CostPer1K: 0.0005, Quality: 0.5,
-				Tags: map[string]string{"tier": "economy"}, Enabled: true,
+				Name:      "OpenAI-主节点",
+				ModelID:   "gpt-4",
+				Adapter:   adapters.NewOpenAIAdapter(cfg.OpenAIApiKey, cfg.OpenAIURL, cfg.OpenAITimeout),
+				Weight:    100,
+				CostPer1K: 0.03,
+				Quality:   0.95,
+				Tags:      map[string]string{"tier": "premium", "provider": "openai"},
+				Enabled:   true,
 			},
 		}
-		slog.Warn("未检测到 OpenAI API Key，将为所有节点使用 Mock 适配器。")
 	}
 
-	// 5. 初始化健康追踪器与智能路由器：
+	slog.Warn("未检测到 OpenAI API Key，将使用 Mock 适配器。")
+	return []*router.ModelNode{
+		{
+			Name: "主模拟节点", ModelID: "mock-primary",
+			Adapter: &adapters.MockAdapter{Name: "Primary"}, Weight: 80,
+			CostPer1K: 0.001, Quality: 0.7,
+			Tags: map[string]string{"tier": "standard"}, Enabled: true,
+		},
+		{
+			Name: "备用模拟节点", ModelID: "mock-secondary",
+			Adapter: &adapters.MockAdapter{Name: "Secondary"}, Weight: 20,
+			CostPer1K: 0.0005, Quality: 0.5,
+			Tags: map[string]string{"tier": "economy"}, Enabled: true,
+		},
+	}
+}
+
+// initSmartRouter 初始化路由器并注册所有路由策略。
+func initSmartRouter(cfg *config.Config, nodes []*router.ModelNode) (*router.SmartRouter, *router.HealthTracker) {
 	tracker := router.NewHealthTracker(cfg.HealthAlpha)
 	sr := router.NewSmartRouter(nodes, tracker, cfg.RouteStrategy)
 
-	// 6. 注册所有路由策略：
+	// 注册所有路由策略：
 	sr.RegisterStrategy(&router.WeightedStrategy{})
 	sr.RegisterStrategy(&router.CostStrategy{MinQuality: 0.6})
 	sr.RegisterStrategy(&router.LatencyStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.QualityStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.FallbackStrategy{Tracker: tracker})
+
 	// 规则路由：示例规则（按需自定义）。
 	sr.RegisterStrategy(router.NewRuleStrategy([]router.Rule{
 		{
@@ -98,27 +127,7 @@ func main() {
 		},
 	}))
 
-	slog.Info("智能路由引擎就绪",
-		"default_strategy", cfg.RouteStrategy,
-		"nodes_registered", len(nodes),
-		"strategies_registered", 6,
-	)
-
-	// 7. 初始化业务组件：
-	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr)
-
-	// 8. 配置 HTTP 路由：
-	engine := routes.NewRouter(chatHandler, cfg)
-
-	// 9. 启动服务：
-	slog.Info("AI 网关核心服务已就绪",
-		"addr", ":"+cfg.Port,
-		"keys_loaded", len(cfg.APIKeys),
-		"ratelimit_qps", cfg.RateLimitQPS,
-	)
-	if err := engine.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("致命错误: 服务器启动失败: %v", err)
-	}
+	return sr, tracker
 }
 
 // mustDial 建立与目标地址的 gRPC 连接。
