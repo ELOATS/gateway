@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -17,10 +18,10 @@ var (
 )
 
 // SmartRouter 是路由模块的核心调度器。
-// 它持有模型注册表、健康追踪器和策略池，负责为每个请求选择最优节点。
+// 优化为 Copy-on-Write (CoW) 机制，减少核心路径锁竞争。
 type SmartRouter struct {
 	mu          sync.RWMutex
-	nodes       []*ModelNode
+	nodes       atomic.Value // 存储 []*ModelNode
 	strategies  map[string]Strategy
 	defaultName string
 	Tracker     *HealthTracker
@@ -28,41 +29,40 @@ type SmartRouter struct {
 
 // NewSmartRouter 创建一个新的智能路由器实例。
 func NewSmartRouter(nodes []*ModelNode, tracker *HealthTracker, defaultStrategy string) *SmartRouter {
-	return &SmartRouter{
-		nodes:       nodes,
+	sr := &SmartRouter{
 		strategies:  make(map[string]Strategy),
 		defaultName: defaultStrategy,
 		Tracker:     tracker,
 	}
+	sr.nodes.Store(nodes)
+	return sr
 }
 
 // RegisterStrategy 注册一种路由策略。
 func (sr *SmartRouter) RegisterStrategy(s Strategy) {
 	sr.mu.Lock()
-	defer sr.mu.Unlock()
 	sr.strategies[s.Name()] = s
+	sr.mu.Unlock()
 	slog.Info("路由策略已注册", "strategy", s.Name())
 }
 
 // Route 是路由的核心入口。
-// 策略选择优先级：
-//  1. 请求头 X-Route-Strategy 显式指定
-//  2. 以上无指定 → 使用默认策略
-//
-// 如果首选策略返回 nil，自动回退到 fallback 策略。
+// 采用快照机制（CoW），读取节点列表无需获取锁。
 func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
-	sr.mu.RLock()
-	defer sr.mu.RUnlock()
+	// 快照读取。
+	nodes := sr.nodes.Load().([]*ModelNode)
 
-	// 过滤出所有已启用的节点，且排除指定的节点（重试时使用）。
-	active := sr.filterNodes(ctx.ExcludeNodes)
+	// 过滤出所有已启用的节点，且排除指定的节点。
+	active := sr.filterNodesSnap(nodes, ctx.ExcludeNodes)
 	if len(active) == 0 {
 		return nil, ErrNoNodes
 	}
 
-	// 确定使用的策略。
+	sr.mu.RLock()
 	strategyName := sr.resolveStrategy(ctx)
 	strategy, ok := sr.strategies[strategyName]
+	sr.mu.RUnlock()
+
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNoStrategy, strategyName)
 	}
@@ -72,15 +72,16 @@ func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
 	// 执行策略选择。
 	node := strategy.Select(ctx, active)
 
-	// 若首选策略未返回结果，回退到 fallback。
 	if node == nil && strategyName != "fallback" {
-		if fb, exists := sr.strategies["fallback"]; exists {
+		sr.mu.RLock()
+		fb, exists := sr.strategies["fallback"]
+		sr.mu.RUnlock()
+		if exists {
 			slog.Warn("首选策略无结果，回退至故障转移", "strategy", strategyName, "request_id", ctx.RequestID)
 			node = fb.Select(ctx, active)
 		}
 	}
 
-	// 最终兜底：策略均无结果，选第一个节点。
 	if node == nil {
 		slog.Warn("所有策略无结果，使用首个可用节点", "request_id", ctx.RequestID)
 		node = active[0]
@@ -89,25 +90,21 @@ func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
 	return node, nil
 }
 
-// UpdateNodes 以线程安全的方式动态更新模型节点列表。
+// UpdateNodes 动态更新模型节点列表（CoW 写入端）。
 func (sr *SmartRouter) UpdateNodes(nodes []*ModelNode) {
-	sr.mu.Lock()
-	defer sr.mu.Unlock()
-	sr.nodes = nodes
+	sr.nodes.Store(nodes)
+	slog.Info("模型节点列表已更新（CoW）", "count", len(nodes))
 }
 
-// filterNodes 返回已启用且未在排除列表中的节点。
-func (sr *SmartRouter) filterNodes(exclude []string) []*ModelNode {
-	sr.mu.RLock()
-	defer sr.mu.RUnlock()
-
+// filterNodesSnap 基于快照进行过滤。
+func (sr *SmartRouter) filterNodesSnap(nodes []*ModelNode, exclude []string) []*ModelNode {
 	var active []*ModelNode
 	excludeMap := make(map[string]bool)
 	for _, e := range exclude {
 		excludeMap[e] = true
 	}
 
-	for _, n := range sr.nodes {
+	for _, n := range nodes {
 		if n.Enabled && !excludeMap[n.Name] {
 			active = append(active, n)
 		}
@@ -117,11 +114,10 @@ func (sr *SmartRouter) filterNodes(exclude []string) []*ModelNode {
 
 // GetNodes 返回所有注册节点的副本。
 func (sr *SmartRouter) GetNodes() []*ModelNode {
-	sr.mu.RLock()
-	defer sr.mu.RUnlock()
-	nodes := make([]*ModelNode, len(sr.nodes))
-	copy(nodes, sr.nodes)
-	return nodes
+	nodes := sr.nodes.Load().([]*ModelNode)
+	res := make([]*ModelNode, len(nodes))
+	copy(res, nodes)
+	return res
 }
 
 // GetStrategies 返回所有已注册策略的名称列表。
@@ -135,16 +131,12 @@ func (sr *SmartRouter) GetStrategies() []string {
 	return names
 }
 
-// resolveStrategy 确定当前请求应使用的策略名称。
+// resolveStrategy 内部辅助，需在持有读锁时调用。
 func (sr *SmartRouter) resolveStrategy(ctx *RouteContext) string {
-	// 优先级 1：请求头显式指定。
 	if hint := ctx.Header("X-Route-Strategy"); hint != "" {
 		if _, ok := sr.strategies[hint]; ok {
 			return hint
 		}
-		slog.Warn("请求头指定的策略不存在，回退到默认", "hint", hint)
 	}
-
-	// 优先级 2：默认策略。
 	return sr.defaultName
 }

@@ -20,6 +20,35 @@ type Provider interface {
 	ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error)
 }
 
+// ProviderType 定义支持的供应商类型。
+type ProviderType string
+
+const (
+	OpenAI ProviderType = "openai"
+	Mock   ProviderType = "mock"
+)
+
+// Config 包含创建适配器所需的配置信息。
+type Config struct {
+	Type    ProviderType
+	APIKey  string
+	URL     string
+	Timeout time.Duration
+	Name    string // 仅用于 Mock
+}
+
+// NewProvider 是一个工厂函数，根据配置创建对应的 Provider 实例。
+func NewProvider(cfg Config) (Provider, error) {
+	switch cfg.Type {
+	case OpenAI:
+		return NewOpenAIAdapter(cfg.APIKey, cfg.URL, cfg.Timeout), nil
+	case Mock:
+		return &MockAdapter{Name: cfg.Name}, nil
+	default:
+		return nil, fmt.Errorf("unsupported provider type: %s", cfg.Type)
+	}
+}
+
 // OpenAIAdapter 是用于调用 OpenAI 官方 API 的适配器。
 type OpenAIAdapter struct {
 	APIKey  string
