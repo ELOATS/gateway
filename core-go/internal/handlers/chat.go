@@ -3,6 +3,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -70,12 +71,16 @@ func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	// 6. 更新请求提示词并执行路由调度
 	if len(req.Messages) > 0 {
 		req.Messages[len(req.Messages)-1].Content = finalPrompt
 	}
 
-	h.routeAndExecute(c, &req, requestID, start)
+	// 6. 判定响应模式：流式还是阻塞
+	if req.Stream {
+		h.streamExecute(c, ctx, &req, requestID, start)
+	} else {
+		h.routeAndExecute(c, ctx, &req, requestID, start)
+	}
 }
 
 // extractPrompt 从请求体中提取最后一条用户消息。
@@ -159,51 +164,159 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 	return pyResp.SanitizedPrompt, true
 }
 
-// routeAndExecute 执行智能路由并调用最终的 AI 模型提供商。
-// 路由结果会被反馈到 HealthTracker 以更新节点健康状态。
-func (h *ChatHandler) routeAndExecute(c *gin.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {
-	// 构造路由上下文。
+// runOutputGuardrails 对模型生成的响应进行安全合规审计。
+func (h *ChatHandler) runOutputGuardrails(ctx context.Context, rid, text, model string) (string, bool) {
+	// 阶段 1: Python 智能层 - 执行输出合规审计（如幻觉、敏感信息检测）
+	pyCtx, cancelPy := context.WithTimeout(ctx, h.config.GuardrailIntellTimeout)
+	defer cancelPy()
+
+	pyResp, err := h.intelligenceClient.CheckOutput(pyCtx, &pb.OutputRequest{ResponseText: text})
+	if err != nil {
+		slog.Warn("输出审计服务不可用或超时，降级放行", "request_id", rid, "error", err)
+		return text, true
+	}
+
+	if !pyResp.Safe {
+		slog.Warn("输出安全拦截", "request_id", rid)
+		return pyResp.SanitizedText, true // 或者返回自定义错误。这里选择返回被脱敏/说明后的文本。
+	}
+
+	return pyResp.SanitizedText, true
+}
+
+// streamExecute 执行流式转发逻辑。
+func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {
+	// 1. 路由选择（流式暂不支持重试，因为首字节返回后状态码已发送）
 	routeCtx := &router.RouteContext{
 		RequestID:    rid,
 		Model:        req.Model,
-		PromptTokens: len(h.extractPrompt(req)) / h.config.TokenEstimationFactor, // 粗略估算。
+		PromptTokens: len(h.extractPrompt(req)) / h.config.TokenEstimationFactor,
 		UserTier:     c.GetString("key_label"),
-		Headers: map[string]string{
-			"X-Route-Strategy": c.GetHeader("X-Route-Strategy"),
-		},
+		Headers:      map[string]string{"X-Route-Strategy": c.GetHeader("X-Route-Strategy")},
 	}
 
 	node, err := h.router.Route(routeCtx)
 	if err != nil {
-		slog.Error("路由失败", "request_id", rid, "error", err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "routing_error", "message": err.Error()})
-		observability.RequestsTotal.WithLabelValues("503", req.Model).Inc()
 		return
 	}
 
-	slog.Info("路由分配", "request_id", rid, "node", node.Name, "model_id", node.ModelID)
+	// 2. 调用流式接口
+	respCh, errCh := node.Adapter.ChatCompletionStream(req)
 
-	// 执行调用并记录健康数据。
-	callStart := time.Now()
-	resp, err := node.Adapter.ChatCompletion(req)
-	callDuration := time.Since(callStart)
+	// 3. 设置 SSE 响应头
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Flush()
 
-	if err != nil {
-		h.router.Tracker.RecordFailure(node.Name)
-		slog.Error("供应商调用失败", "request_id", rid, "node", node.Name, "error", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "provider_error", "message": err.Error()})
-		observability.RequestsTotal.WithLabelValues("502", req.Model).Inc()
-		return
+	// 4. 流式转发循环
+	slog.Info("流式传输开始", "request_id", rid, "node", node.Name)
+	
+	flusher := c.Writer
+	h.router.Tracker.RecordSuccess(node.Name, 0) // 流式记为成功，延迟统计到结束
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Warn("客户端断开连接或超时", "request_id", rid)
+			return
+		case err := <-errCh:
+			if err != nil {
+				slog.Error("供应商流损毁", "request_id", rid, "error", err)
+				fmt.Fprintf(c.Writer, "data: {\"error\": \"stream_error\", \"message\": \"%s\"}\n\n", err.Error())
+				return
+			}
+		case streamResp, ok := <-respCh:
+			if !ok {
+				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+				flusher.Flush()
+				slog.Info("流式传输完成", "request_id", rid, "duration_ms", time.Since(start).Milliseconds())
+				return
+			}
+
+			data, _ := json.Marshal(streamResp)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", string(data))
+			flusher.Flush()
+		}
+	}
+}
+
+// routeAndExecute 执行智能路由并调用最终的 AI 模型提供商。
+// 路由结果会被反馈到 HealthTracker 以更新节点健康状态。
+// P1 阶段重构：增加了基于排除列表的循环重试逻辑。
+func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {
+	var excluded []string
+	maxRetries := h.config.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
 
-	// 记录成功调用的延迟到健康追踪器。
-	h.router.Tracker.RecordSuccess(node.Name, callDuration)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// 1. 构造路由上下文。
+		routeCtx := &router.RouteContext{
+			RequestID:    rid,
+			Model:        req.Model,
+			PromptTokens: len(h.extractPrompt(req)) / h.config.TokenEstimationFactor,
+			UserTier:     c.GetString("key_label"),
+			Headers: map[string]string{
+				"X-Route-Strategy": c.GetHeader("X-Route-Strategy"),
+			},
+			ExcludeNodes: excluded,
+		}
 
-	duration := time.Since(start)
-	observability.Latency.WithLabelValues(req.Model).Observe(duration.Seconds())
-	observability.NodeLatency.WithLabelValues(node.Name).Observe(callDuration.Seconds())
-	observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
+		// 2. 路由选择。
+		node, err := h.router.Route(routeCtx)
+		if err != nil {
+			slog.Error("路由失败", "request_id", rid, "attempt", attempt, "error", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "routing_error", "message": err.Error()})
+			observability.RequestsTotal.WithLabelValues("503", req.Model).Inc()
+			return
+		}
 
-	slog.Info("请求完成", "request_id", rid, "node", node.Name, "duration_ms", duration.Milliseconds())
-	c.JSON(http.StatusOK, resp)
+		if attempt > 0 {
+			slog.Info("正在重试路由", "request_id", rid, "attempt", attempt, "next_node", node.Name)
+		} else {
+			slog.Info("路由分配", "request_id", rid, "node", node.Name, "model_id", node.ModelID)
+		}
+
+		// 3. 执行供应商调用。
+		callStart := time.Now()
+		resp, err := node.Adapter.ChatCompletion(req)
+		callDuration := time.Since(callStart)
+
+		if err != nil {
+			h.router.Tracker.RecordFailure(node.Name)
+			slog.Error("供应商调用失败", "request_id", rid, "node", node.Name, "error", err)
+
+			if attempt < maxRetries {
+				excluded = append(excluded, node.Name)
+				continue
+			}
+
+			c.JSON(http.StatusBadGateway, gin.H{"error": "provider_error", "message": err.Error()})
+			observability.RequestsTotal.WithLabelValues("502", req.Model).Inc()
+			return
+		}
+
+		// 4. 记录调用反馈。
+		h.router.Tracker.RecordSuccess(node.Name, callDuration)
+
+		// 5. 执行输出审计 (Output Guardrails)。
+		finalText := resp.Choices[0].Message.Content
+		if len(resp.Choices) > 0 {
+			auditedText, _ := h.runOutputGuardrails(ctx, rid, finalText, node.ModelID)
+			resp.Choices[0].Message.Content = auditedText
+		}
+
+		// 6. 记录指标并返回。
+		duration := time.Since(start)
+		observability.Latency.WithLabelValues(req.Model).Observe(duration.Seconds())
+		observability.NodeLatency.WithLabelValues(node.Name).Observe(callDuration.Seconds())
+		observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
+
+		slog.Info("请求完成", "request_id", rid, "node", node.Name, "duration_ms", duration.Milliseconds(), "attempts", attempt+1)
+		c.JSON(http.StatusOK, resp)
+		return
+	}
 }

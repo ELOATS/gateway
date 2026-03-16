@@ -2,11 +2,13 @@
 package adapters
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ai-gateway/core/pkg/models"
@@ -15,6 +17,7 @@ import (
 // Provider 定义了不同 AI 提供者的统一调用接口。
 type Provider interface {
 	ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error)
+	ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error)
 }
 
 // OpenAIAdapter 是用于调用 OpenAI 官方 API 的适配器。
@@ -74,6 +77,66 @@ func (a *OpenAIAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mode
 	return &result, nil
 }
 
+// ChatCompletionStream 执行流式补全请求。
+func (a *OpenAIAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
+	respCh := make(chan *models.ChatCompletionStreamResponse)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(respCh)
+		defer close(errCh)
+
+		req.Stream = true
+		data, _ := json.Marshal(req)
+		httpReq, _ := http.NewRequest("POST", a.URL, bytes.NewBuffer(data))
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+a.APIKey)
+		httpReq.Header.Set("Accept", "text/event-stream")
+
+		resp, err := a.Client.Do(httpReq)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			errCh <- fmt.Errorf("provider error (%d): %s", resp.StatusCode, body)
+			return
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err != io.EOF {
+					errCh <- err
+				}
+				break
+			}
+
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+
+			dataStr := strings.TrimPrefix(line, "data: ")
+			if dataStr == "[DONE]" {
+				break
+			}
+
+			var streamResp models.ChatCompletionStreamResponse
+			if err := json.Unmarshal([]byte(dataStr), &streamResp); err != nil {
+				continue // 忽略损坏的行
+			}
+			respCh <- &streamResp
+		}
+	}()
+
+	return respCh, errCh
+}
+
 // MockAdapter 是用于开发测试的模拟适配器。
 type MockAdapter struct {
 	Name string
@@ -102,4 +165,38 @@ func (a *MockAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models
 			TotalTokens:      20,
 		},
 	}, nil
+}
+
+// ChatCompletionStream 模拟流式响应。
+func (a *MockAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
+	respCh := make(chan *models.ChatCompletionStreamResponse)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(respCh)
+		defer close(errCh)
+
+		chunks := []string{"你好", "！", "我是", "一个", "来自", "网关", "的", "流式", "响应", "。"}
+		for i, text := range chunks {
+			respCh <- &models.ChatCompletionStreamResponse{
+				ID:      fmt.Sprintf("mock-stream-%d", time.Now().Unix()),
+				Created: time.Now().Unix(),
+				Model:   req.Model,
+				Choices: []models.StreamChoice{
+					{
+						Index: 0,
+						Delta: models.ChoiceDelta{Content: text},
+					},
+				},
+			}
+			if i == len(chunks)-1 {
+				respCh <- &models.ChatCompletionStreamResponse{
+					Choices: []models.StreamChoice{{Index: 0, FinishReason: "stop"}},
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	return respCh, errCh
 }
