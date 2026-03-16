@@ -27,6 +27,9 @@ type Config struct {
 	RateLimitBurst int           // 令牌桶突发容量。
 	PythonAddr     string        // Python 智能层 gRPC 地址。
 	RustAddr       string        // Rust 加速层 gRPC 地址。
+	RedisAddr      string        // Redis 地址 (用于分布式限流)。
+	RedisPassword  string        // Redis 密码。
+	RedisDB        int           // Redis 数据库索引。
 	RouteStrategy  string        // 默认路由策略（weighted/cost/latency/quality/fallback）。
 	HealthAlpha    float64       // 健康追踪 EWMA 衰减因子（0.0~1.0）。
 
@@ -45,6 +48,9 @@ type Config struct {
 	// gRPC 策略
 	GRPCBaseDelay time.Duration // gRPC 重试基础延迟。
 	GRPCMaxDelay  time.Duration // gRPC 重试最大延迟。
+
+	// Observability
+	OTELCollectorAddr string // OpenTelemetry Collector 地址。
 
 	// 算法参数
 	TokenEstimationFactor int // 字符转 Token 估算系数。
@@ -69,6 +75,9 @@ func LoadConfig() *Config {
 		RateLimitBurst: burst,
 		PythonAddr:     getEnv("PYTHON_ADDR", "localhost:50051"),
 		RustAddr:       getEnv("RUST_ADDR", "localhost:50052"),
+		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
+		RedisDB:        getIntEnv("REDIS_DB", 0),
 		OpenAIApiKey:   os.Getenv("OPENAI_API_KEY"),
 		RouteStrategy:  getEnv("ROUTE_STRATEGY", "weighted"),
 		HealthAlpha:    healthAlpha,
@@ -87,6 +96,7 @@ func LoadConfig() *Config {
 
 		TokenEstimationFactor: tokenFactor,
 		MaxRetries:            getIntEnv("MAX_RETRIES", 2),
+		OTELCollectorAddr:     os.Getenv("OTEL_COLLECTOR_ADDR"),
 	}
 }
 

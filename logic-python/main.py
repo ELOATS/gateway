@@ -1,13 +1,10 @@
-"""Intelligence Plane (Python) - Enhanced with Trace-ID and Logging.
-
-Follows Google Python Style Guide.
-"""
-
 import concurrent.futures
 import json
 import logging
 import os
+import queue
 import threading
+import time
 from typing import List, Tuple
 
 import faiss
@@ -46,6 +43,30 @@ VECTOR_DIMENSION = 384
 FAISS_INDEX = faiss.IndexFlatL2(VECTOR_DIMENSION)
 CACHE_STORE: List[Tuple[str, str]] = []
 cache_lock = threading.Lock()
+
+# Asynchronous persistence queue.
+PERSISTENCE_QUEUE = queue.Queue()
+
+
+def persistence_worker():
+    """Background thread that persists cache to disk upon update."""
+    logger.info("Persistence background worker started.")
+    while True:
+        try:
+            # Wait for a "dirty" signal.
+            _ = PERSISTENCE_QUEUE.get()
+            
+            # De-duplicate quick updates: wait briefly to see if more come in.
+            time.sleep(1) 
+            while not PERSISTENCE_QUEUE.empty():
+                PERSISTENCE_QUEUE.get_nowait()
+            
+            # Trigger the save.
+            save_cache()
+            
+            PERSISTENCE_QUEUE.task_done()
+        except Exception as e:
+            logger.error("Error in persistence worker: %s", e)
 
 
 def load_cache():
@@ -181,20 +202,25 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
             self._add_to_cache(prompt, "答案是 2。")
 
     def _add_to_cache(self, prompt: str, response: str):
-        """将新条目添加到语义索引并持久化到磁盘。"""
+        """将新条目添加到语义索引并异步持久化。"""
         embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
         
         with cache_lock:
             FAISS_INDEX.add(embedding)
             CACHE_STORE.append((prompt, response))
         
-        # 保存到磁盘。save_cache 内部会处理锁。
-        save_cache()
+        # 通知后台线程进行保存。
+        PERSISTENCE_QUEUE.put(True)
 
 
 def serve():
     """启动 gRPC 服务器。"""
     load_cache()
+    
+    # 启动异步持久化背景线程。
+    worker = threading.Thread(target=persistence_worker, daemon=True)
+    worker.start()
+
     # 从环境变量读取端口，默认为 50051
     port = os.getenv("PYTHON_GRPC_PORT", os.getenv("GRPC_PORT", "50051"))
     server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=10))

@@ -7,10 +7,11 @@ import (
 	"github.com/ai-gateway/core/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 )
 
 // NewRouter 初始化并配置 API 网关的所有 HTTP 路由。
-func NewRouter(h *handlers.ChatHandler, ah *handlers.AdminHandler, cfg *config.Config) *gin.Engine {
+func NewRouter(h *handlers.ChatHandler, ah *handlers.AdminHandler, rdb *redis.Client, cfg *config.Config) *gin.Engine {
 	r := gin.Default()
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
@@ -24,8 +25,8 @@ func NewRouter(h *handlers.ChatHandler, ah *handlers.AdminHandler, cfg *config.C
 
 	v1 := r.Group("/v1")
 	v1.Use(middleware.RequestID())
-	v1.Use(middleware.RateLimiter(cfg.RateLimitQPS, cfg.RateLimitBurst))
 	v1.Use(middleware.AuthRequired(cfg.APIKeys))
+	v1.Use(middleware.RateLimiter(rdb, cfg.RateLimitQPS, cfg.RateLimitBurst))
 	{
 		v1.POST("/chat/completions", h.HandleChatCompletions)
 	}

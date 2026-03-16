@@ -7,12 +7,6 @@ use regex::Regex;
 use tiktoken_rs::{cl100k_base, p50k_base, r50k_base};
 use tonic::{transport::Server, Request, Response, Status};
 
-/// 全局静态正则表达式，用于检测并脱敏电子邮件（PII）。
-static RE_EMAIL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-        .expect("无法编译 PII 电子邮件正则表达式")
-});
-
 /// 从 proto/gateway.proto 生成的 gRPC 代码。
 pub mod gateway {
     tonic::include_proto!("gateway");
@@ -23,6 +17,18 @@ use gateway::{
     CacheRequest, CacheResponse, InputRequest, InputResponse, OutputRequest, OutputResponse,
     TokenRequest, TokenResponse,
 };
+use tiktoken_rs::CoreBPE;
+
+/// 全局静态正则表达式，用于检测并脱敏电子邮件（PII）。
+static RE_EMAIL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+        .expect("无法编译 PII 电子邮件正则表达式")
+});
+
+/// 全局静态分词器，避免重复初始化开销。
+static BPE_CL100K: Lazy<CoreBPE> = Lazy::new(|| cl100k_base().expect("无法初始化 cl100k_base"));
+static BPE_P50K: Lazy<CoreBPE> = Lazy::new(|| p50k_base().expect("无法初始化 p50k_base"));
+static BPE_R50K: Lazy<CoreBPE> = Lazy::new(|| r50k_base().expect("无法初始化 r50k_base"));
 
 /// MyAiLogic 实现了高性能 AI 工具集的 gRPC 服务接口。
 #[derive(Default)]
@@ -53,8 +59,7 @@ impl AiLogic for MyAiLogic {
         
         log::info!("[RID:{}] Nitro 平面：正在执行 PII 脱敏", rid);
 
-        // 使用全局静态正则进行脱敏。
-        // 使用 COW (Copy-On-Write) 机制，若无匹配则避免不必要的内存分配。
+        // 使用全局静态正则进行脱敏集。
         let sanitized = RE_EMAIL.replace_all(&req.prompt, "[PII_EMAIL_MASKED]");
 
         Ok(Response::new(InputResponse {
@@ -72,17 +77,12 @@ impl AiLogic for MyAiLogic {
         let req = request.into_inner();
         let model_name = req.model.to_lowercase();
 
-        // 根据模型家族选择合适的 BPE (字节对编码) 分词器。
-        let bpe_res = match () {
-            _ if model_name.contains("gpt-4") || model_name.contains("3.5-turbo") => cl100k_base(),
-            _ if model_name.contains("davinci") => p50k_base(),
-            _ => r50k_base(),
+        // 使用全局预初始化的分词器。
+        let bpe: &CoreBPE = match () {
+            _ if model_name.contains("gpt-4") || model_name.contains("3.5-turbo") => &BPE_CL100K,
+            _ if model_name.contains("davinci") => &BPE_P50K,
+            _ => &BPE_R50K,
         };
-
-        let bpe = bpe_res.map_err(|e| {
-            log::error!("[RID:{}] BPE 初始化失败: {}", rid, e);
-            Status::internal("无法初始化分词器")
-        })?;
 
         let count = bpe.encode_with_special_tokens(&req.text).len();
         log::info!("[RID:{}] Nitro 平面：Token 统计结果: {}", rid, count);

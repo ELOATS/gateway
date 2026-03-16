@@ -8,8 +8,52 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"google.golang.org/grpc/metadata"
 )
+
+// InitTracer 初始化 OpenTelemetry 追踪器。
+func InitTracer(ctx context.Context, collectorAddr string) (func(), error) {
+	if collectorAddr == "" {
+		slog.Warn("未配置 OTEL Collector，追踪功能已禁用")
+		return func() {}, nil
+	}
+
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithEndpoint(collectorAddr),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceNameKey.String("ai-gateway-core"),
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	return func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			slog.Error("关闭 TracerProvider 失败", "error", err)
+		}
+	}, nil
+}
 
 var (
 	// RequestIDHeader 是用于透传的追踪 ID 请求头 Key。

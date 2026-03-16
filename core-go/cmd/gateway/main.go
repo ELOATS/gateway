@@ -18,6 +18,7 @@ import (
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
 	"github.com/ai-gateway/core/internal/routes"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
@@ -30,6 +31,27 @@ func main() {
 	// 2. 初始化日志：配置标准化的结构化 JSON 日志输出。
 	observability.InitLogger()
 	slog.Info("正在初始化 AI 网关核心", "port", cfg.Port)
+
+	// 初始化 OpenTelemetry 追踪。
+	shutdownTracer, err := observability.InitTracer(context.Background(), cfg.OTELCollectorAddr)
+	if err != nil {
+		slog.Warn("无法初始化追踪器", "error", err)
+	}
+	defer shutdownTracer()
+
+	// 初始化 Redis 客户端。
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+	// 验证连接。
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		slog.Warn("无法连接至 Redis，分布式限流将不可用", "error", err)
+	} else {
+		slog.Info("Redis 连接成功", "addr", cfg.RedisAddr)
+	}
+	defer rdb.Close()
 
 	// gRPC 连接选项：配置不安全凭据与自适应补偿重试。
 	dialOpts := []grpc.DialOption{
@@ -62,7 +84,7 @@ func main() {
 	// 5. 初始化业务组件与 HTTP 服务：
 	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, cfg)
 	adminHandler := handlers.NewAdminHandler(sr)
-	routerEngine := routes.NewRouter(chatHandler, adminHandler, cfg)
+	routerEngine := routes.NewRouter(chatHandler, adminHandler, rdb, cfg)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -102,11 +124,17 @@ func main() {
 func initNodes(cfg *config.Config) []*router.ModelNode {
 	if cfg.OpenAIApiKey != "" && cfg.OpenAIApiKey != "your-openai-api-key-here" {
 		slog.Info("已注册 OpenAI 真实适配器", "model_id", "gpt-4")
+		adapter, _ := adapters.NewProvider(adapters.Config{
+			Type:    adapters.OpenAI,
+			APIKey:  cfg.OpenAIApiKey,
+			URL:     cfg.OpenAIURL,
+			Timeout: cfg.OpenAITimeout,
+		})
 		return []*router.ModelNode{
 			{
 				Name:      "OpenAI-主节点",
 				ModelID:   "gpt-4",
-				Adapter:   adapters.NewOpenAIAdapter(cfg.OpenAIApiKey, cfg.OpenAIURL, cfg.OpenAITimeout),
+				Adapter:   adapter,
 				Weight:    100,
 				CostPer1K: 0.03,
 				Quality:   0.95,
@@ -117,16 +145,19 @@ func initNodes(cfg *config.Config) []*router.ModelNode {
 	}
 
 	slog.Warn("未检测到 OpenAI API Key，将使用 Mock 适配器。")
+	mock1, _ := adapters.NewProvider(adapters.Config{Type: adapters.Mock, Name: "Primary"})
+	mock2, _ := adapters.NewProvider(adapters.Config{Type: adapters.Mock, Name: "Secondary"})
+
 	return []*router.ModelNode{
 		{
 			Name: "主模拟节点", ModelID: "mock-primary",
-			Adapter: &adapters.MockAdapter{Name: "Primary"}, Weight: 80,
+			Adapter: mock1, Weight: 80,
 			CostPer1K: 0.001, Quality: 0.7,
 			Tags: map[string]string{"tier": "standard"}, Enabled: true,
 		},
 		{
 			Name: "备用模拟节点", ModelID: "mock-secondary",
-			Adapter: &adapters.MockAdapter{Name: "Secondary"}, Weight: 20,
+			Adapter: mock2, Weight: 20,
 			CostPer1K: 0.0005, Quality: 0.5,
 			Tags: map[string]string{"tier": "economy"}, Enabled: true,
 		},
