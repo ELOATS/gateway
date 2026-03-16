@@ -48,6 +48,7 @@ type Config struct {
 
 	// 算法参数
 	TokenEstimationFactor int // 字符转 Token 估算系数。
+	MaxRetries            int // 供应商调用最大重试次数。
 }
 
 // LoadConfig 从环境变量或默认值加载配置。
@@ -85,6 +86,7 @@ func LoadConfig() *Config {
 		GRPCMaxDelay:  getDuration("GRPC_MAX_DELAY", 10*time.Second),
 
 		TokenEstimationFactor: tokenFactor,
+		MaxRetries:            getIntEnv("MAX_RETRIES", 2),
 	}
 }
 
@@ -126,4 +128,16 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func getIntEnv(key string, fallback int) int {
+	val := os.Getenv(key)
+	if val == "" {
+		return fallback
+	}
+	iv, err := strconv.Atoi(val)
+	if err != nil {
+		return fallback
+	}
+	return iv
 }

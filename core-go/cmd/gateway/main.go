@@ -2,8 +2,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/adapters"
@@ -55,17 +61,41 @@ func main() {
 
 	// 5. 初始化业务组件与 HTTP 服务：
 	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, cfg)
-	engine := routes.NewRouter(chatHandler, cfg)
+	adminHandler := handlers.NewAdminHandler(sr)
+	routerEngine := routes.NewRouter(chatHandler, adminHandler, cfg)
 
-	// 6. 启动服务：
-	slog.Info("AI 网关核心服务已就绪",
-		"addr", ":"+cfg.Port,
-		"keys_loaded", len(cfg.APIKeys),
-		"ratelimit_qps", cfg.RateLimitQPS,
-	)
-	if err := engine.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("致命错误: 服务器启动失败: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: routerEngine,
 	}
+
+	// 6. 启动服务（在 goroutine 中）：
+	go func() {
+		slog.Info("AI 网关核心服务已就绪",
+			"addr", srv.Addr,
+			"keys_loaded", len(cfg.APIKeys),
+			"ratelimit_qps", cfg.RateLimitQPS,
+		)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("致命错误: 服务器异常退出: %v", err)
+		}
+	}()
+
+	// 7. 优雅关停：监听中断信号。
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	slog.Info("正在关闭服务器...")
+
+	// 设定关停超时。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("服务器强制关闭", "error", err)
+	}
+
+	slog.Info("服务器已退出")
 }
 
 // initNodes 根据配置初始化模型节点。
@@ -109,7 +139,7 @@ func initSmartRouter(cfg *config.Config, nodes []*router.ModelNode) (*router.Sma
 	sr := router.NewSmartRouter(nodes, tracker, cfg.RouteStrategy)
 
 	// 注册所有路由策略：
-	sr.RegisterStrategy(&router.WeightedStrategy{})
+	sr.RegisterStrategy(&router.WeightedStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.CostStrategy{MinQuality: 0.6})
 	sr.RegisterStrategy(&router.LatencyStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.QualityStrategy{Tracker: tracker})

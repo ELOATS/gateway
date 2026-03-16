@@ -8,6 +8,7 @@ type RouteContext struct {
 	PromptTokens int               // 预估的 Prompt Token 数量。
 	UserTier     string            // 用户等级（从 API Key Label 提取，如 "admin", "free"）。
 	Headers      map[string]string // 请求头中的路由暗示（如 X-Route-Strategy）。
+	ExcludeNodes []string          // 需要排除的节点列表。
 }
 
 // Header 安全地从 Headers 中读取请求头值。

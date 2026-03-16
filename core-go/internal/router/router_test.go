@@ -277,3 +277,45 @@ func TestSmartRouter_AllDisabledReturnsError(t *testing.T) {
 		t.Fatal("所有节点禁用时 Route 应返回错误")
 	}
 }
+// --- 基准测试 (Benchmarks) ---
+
+func BenchmarkWeightedStrategy_Select_10Nodes(b *testing.B) {
+	s := &WeightedStrategy{}
+	nodes := make([]*ModelNode, 10)
+	for i := 0; i < 10; i++ {
+		nodes[i] = &ModelNode{Name: "n", Weight: 10, Enabled: true}
+	}
+	ctx := defaultCtx()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.Select(ctx, nodes)
+	}
+}
+
+func BenchmarkWeightedStrategy_Select_100Nodes(b *testing.B) {
+	s := &WeightedStrategy{}
+	nodes := make([]*ModelNode, 100)
+	for i := 0; i < 100; i++ {
+		nodes[i] = &ModelNode{Name: "n", Weight: 10, Enabled: true}
+	}
+	ctx := defaultCtx()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.Select(ctx, nodes)
+	}
+}
+
+func BenchmarkSmartRouter_Route_10Nodes(b *testing.B) {
+	nodes := make([]*ModelNode, 10)
+	for i := 0; i < 10; i++ {
+		nodes[i] = &ModelNode{Name: "n", Weight: 10, Enabled: true}
+	}
+	tracker := NewHealthTracker(0.3)
+	sr := NewSmartRouter(nodes, tracker, "weighted")
+	sr.RegisterStrategy(&WeightedStrategy{})
+	ctx := defaultCtx()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sr.Route(ctx)
+	}
+}

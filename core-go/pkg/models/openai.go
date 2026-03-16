@@ -38,3 +38,24 @@ type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
+// ChatCompletionStreamResponse 表示流式响应中的单个分块。
+type ChatCompletionStreamResponse struct {
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Created int64          `json:"created"`
+	Model   string         `json:"model"`
+	Choices []StreamChoice `json:"choices"`
+}
+
+// StreamChoice 表示流式响应中的单个选项。
+type StreamChoice struct {
+	Index        int         `json:"index"`
+	Delta        ChoiceDelta `json:"delta"`
+	FinishReason string      `json:"finish_reason,omitempty"`
+}
+
+// ChoiceDelta 表示流式响应中增量的消息内容。
+type ChoiceDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}

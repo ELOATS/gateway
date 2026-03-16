@@ -54,8 +54,8 @@ func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
 
-	// 过滤出所有已启用的节点。
-	active := sr.activeNodes()
+	// 过滤出所有已启用的节点，且排除指定的节点（重试时使用）。
+	active := sr.filterNodes(ctx.ExcludeNodes)
 	if len(active) == 0 {
 		return nil, ErrNoNodes
 	}
@@ -96,15 +96,43 @@ func (sr *SmartRouter) UpdateNodes(nodes []*ModelNode) {
 	sr.nodes = nodes
 }
 
-// activeNodes 返回所有已启用的节点。
-func (sr *SmartRouter) activeNodes() []*ModelNode {
+// filterNodes 返回已启用且未在排除列表中的节点。
+func (sr *SmartRouter) filterNodes(exclude []string) []*ModelNode {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+
 	var active []*ModelNode
+	excludeMap := make(map[string]bool)
+	for _, e := range exclude {
+		excludeMap[e] = true
+	}
+
 	for _, n := range sr.nodes {
-		if n.Enabled {
+		if n.Enabled && !excludeMap[n.Name] {
 			active = append(active, n)
 		}
 	}
 	return active
+}
+
+// GetNodes 返回所有注册节点的副本。
+func (sr *SmartRouter) GetNodes() []*ModelNode {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	nodes := make([]*ModelNode, len(sr.nodes))
+	copy(nodes, sr.nodes)
+	return nodes
+}
+
+// GetStrategies 返回所有已注册策略的名称列表。
+func (sr *SmartRouter) GetStrategies() []string {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	var names []string
+	for name := range sr.strategies {
+		names = append(names, name)
+	}
+	return names
 }
 
 // resolveStrategy 确定当前请求应使用的策略名称。
