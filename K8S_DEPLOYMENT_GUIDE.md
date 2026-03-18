@@ -8,6 +8,7 @@
 
 | 平面 (Plane) | 技术栈 | 服务名称 (K8s Service) | 职责 |
 | :--- | :--- | :--- | :--- |
+| **基础设施** | **Redis** | `redis-service` | 分布式限流、状态共享 |
 | **编排层 (Orchestration)** | **Go** | `orchestration-service` | 入口、路由、可观测性、身份验证 |
 | **加速层 (Nitro)** | **Rust** | `nitro-service` | PII 脱敏、Token 计数 (高性能正则/分词) |
 | **智能层 (Intelligence)** | **Python** | `intelligence-service` | 语义缓存 (FAISS)、安全审计、幻觉检测 |
@@ -79,7 +80,10 @@ minikube image load ai-gateway-nitro:latest
 # 1. 部署基础配置 (Namespace, Secret, PVC)
 kubectl apply -f k8s/base.yaml
 
-# 2. 部署后端微服务 (Rust & Python)
+# 2. 部署基础设施 (Redis)
+kubectl apply -f k8s/redis.yaml
+
+# 3. 部署后端微服务 (Rust & Python)
 kubectl apply -f k8s/nitro.yaml
 kubectl apply -f k8s/intelligence.yaml
 
