@@ -12,8 +12,9 @@ import (
 
 // APIKeyEntry 表示一个经过授权的 API Key 及其关联的标签（Label）。
 type APIKeyEntry struct {
-	Key   string // API Key 字符串。
-	Label string // 用于标识调用方（如 admin, user1）的标签。
+	Key        string // API Key 字符串。
+	Label      string // 用户标签。
+	DailyQuota int64  // 每日最大 Token 配额 (若为 0 则不限制)。
 }
 
 // Config 存储网关的所有全局配置。
@@ -55,6 +56,10 @@ type Config struct {
 	// 算法参数
 	TokenEstimationFactor int // 字符转 Token 估算系数。
 	MaxRetries            int // 供应商调用最大重试次数。
+
+	//打磨阶段新增
+	MaxConcurrentRequests  int           // 最大并发请求数。
+	CircuitBreakerInterval time.Duration // 熔断器尝试恢复的间隔时间。
 }
 
 // LoadConfig 从环境变量或默认值加载配置。
@@ -97,6 +102,9 @@ func LoadConfig() *Config {
 		TokenEstimationFactor: tokenFactor,
 		MaxRetries:            getIntEnv("MAX_RETRIES", 2),
 		OTELCollectorAddr:     os.Getenv("OTEL_COLLECTOR_ADDR"),
+
+		MaxConcurrentRequests:  getIntEnv("MAX_CONCURRENT_REQUESTS", 1000),
+		CircuitBreakerInterval: getDuration("CB_RECOVERY_INTERVAL", 30*time.Second),
 	}
 }
 
@@ -122,13 +130,18 @@ func ParseAPIKeys(raw string) []APIKeyEntry {
 		if p == "" {
 			continue
 		}
-		kv := strings.SplitN(p, ":", 2)
+		kv := strings.SplitN(p, ":", 3)
 		key := kv[0]
 		label := "default"
+		var quota int64 = 0
+
 		if len(kv) > 1 {
 			label = kv[1]
 		}
-		entries = append(entries, APIKeyEntry{Key: key, Label: label})
+		if len(kv) > 2 {
+			quota, _ = strconv.ParseInt(kv[2], 10, 64)
+		}
+		entries = append(entries, APIKeyEntry{Key: key, Label: label, DailyQuota: quota})
 	}
 	return entries
 }

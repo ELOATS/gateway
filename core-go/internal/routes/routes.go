@@ -27,6 +27,7 @@ func NewRouter(h *handlers.ChatHandler, ah *handlers.AdminHandler, rdb *redis.Cl
 	v1.Use(middleware.RequestID())
 	v1.Use(middleware.AuthRequired(cfg.APIKeys))
 	v1.Use(middleware.RateLimiter(rdb, cfg.RateLimitQPS, cfg.RateLimitBurst))
+	v1.Use(middleware.QuotaLimiter(rdb, cfg))
 	{
 		v1.POST("/chat/completions", h.HandleChatCompletions)
 	}

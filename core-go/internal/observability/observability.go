@@ -102,6 +102,24 @@ var (
 		Help:    "每个节点的调用延迟",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"node"})
+	
+	// CacheHitsTotal 统计语义缓存的命中与未命中次数。
+	CacheHitsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_cache_hits_total",
+		Help: "语义缓存命中/未命中总数",
+	}, []string{"status", "model"})
+
+	// CircuitBreakerChanges 统计熔断器状态转换次数。
+	CircuitBreakerChanges = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_circuit_breaker_changes_total",
+		Help: "熔断器状态迁移次数",
+	}, []string{"node", "state"})
+
+	// ProviderErrors 统计各上游 Provider 的错误分布。
+	ProviderErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_provider_errors_total",
+		Help: "上游提供商错误总数",
+	}, []string{"node", "error_type"})
 )
 
 // InitLogger 初始化全局 JSON 结构化日志。

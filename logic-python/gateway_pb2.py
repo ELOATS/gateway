@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rgateway.proto\x12\x07gateway\"\x86\x01\n\x0cInputRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x35\n\x08metadata\x18\x02 \x03(\x0b\x32#.gateway.InputRequest.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"G\n\rInputResponse\x12\x0c\n\x04safe\x18\x01 \x01(\x08\x12\x18\n\x10sanitized_prompt\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\"&\n\rOutputRequest\x12\x15\n\rresponse_text\x18\x01 \x01(\t\"6\n\x0eOutputResponse\x12\x0c\n\x04safe\x18\x01 \x01(\x08\x12\x16\n\x0esanitized_text\x18\x02 \x01(\t\"\x1e\n\x0c\x43\x61\x63heRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\".\n\rCacheResponse\x12\x0b\n\x03hit\x18\x01 \x01(\x08\x12\x10\n\x08response\x18\x02 \x01(\t\"+\n\x0cTokenRequest\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\r\n\x05model\x18\x02 \x01(\t\"\x1e\n\rTokenResponse\x12\r\n\x05\x63ount\x18\x01 \x01(\x05\x32\xff\x01\n\x07\x41iLogic\x12;\n\nCheckInput\x12\x15.gateway.InputRequest\x1a\x16.gateway.InputResponse\x12>\n\x0b\x43heckOutput\x12\x16.gateway.OutputRequest\x1a\x17.gateway.OutputResponse\x12\x39\n\x08GetCache\x12\x15.gateway.CacheRequest\x1a\x16.gateway.CacheResponse\x12<\n\x0b\x43ountTokens\x12\x15.gateway.TokenRequest\x1a\x16.gateway.TokenResponseB\"Z github.com/ai-gateway/core/protob\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rgateway.proto\x12\x07gateway\"\x86\x01\n\x0cInputRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x35\n\x08metadata\x18\x02 \x03(\x0b\x32#.gateway.InputRequest.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"G\n\rInputResponse\x12\x0c\n\x04safe\x18\x01 \x01(\x08\x12\x18\n\x10sanitized_prompt\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\"&\n\rOutputRequest\x12\x15\n\rresponse_text\x18\x01 \x01(\t\"6\n\x0eOutputResponse\x12\x0c\n\x04safe\x18\x01 \x01(\x08\x12\x16\n\x0esanitized_text\x18\x02 \x01(\t\"-\n\x0c\x43\x61\x63heRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\r\n\x05model\x18\x02 \x01(\t\".\n\rCacheResponse\x12\x0b\n\x03hit\x18\x01 \x01(\x08\x12\x10\n\x08response\x18\x02 \x01(\t\"+\n\x0cTokenRequest\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\r\n\x05model\x18\x02 \x01(\t\"\x1e\n\rTokenResponse\x12\r\n\x05\x63ount\x18\x01 \x01(\x05\x32\xff\x01\n\x07\x41iLogic\x12;\n\nCheckInput\x12\x15.gateway.InputRequest\x1a\x16.gateway.InputResponse\x12>\n\x0b\x43heckOutput\x12\x16.gateway.OutputRequest\x1a\x17.gateway.OutputResponse\x12\x39\n\x08GetCache\x12\x15.gateway.CacheRequest\x1a\x16.gateway.CacheResponse\x12<\n\x0b\x43ountTokens\x12\x15.gateway.TokenRequest\x1a\x16.gateway.TokenResponseB\"Z github.com/ai-gateway/core/protob\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -45,13 +45,13 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_OUTPUTRESPONSE']._serialized_start=276
   _globals['_OUTPUTRESPONSE']._serialized_end=330
   _globals['_CACHEREQUEST']._serialized_start=332
-  _globals['_CACHEREQUEST']._serialized_end=362
-  _globals['_CACHERESPONSE']._serialized_start=364
-  _globals['_CACHERESPONSE']._serialized_end=410
-  _globals['_TOKENREQUEST']._serialized_start=412
-  _globals['_TOKENREQUEST']._serialized_end=455
-  _globals['_TOKENRESPONSE']._serialized_start=457
-  _globals['_TOKENRESPONSE']._serialized_end=487
-  _globals['_AILOGIC']._serialized_start=490
-  _globals['_AILOGIC']._serialized_end=745
+  _globals['_CACHEREQUEST']._serialized_end=377
+  _globals['_CACHERESPONSE']._serialized_start=379
+  _globals['_CACHERESPONSE']._serialized_end=425
+  _globals['_TOKENREQUEST']._serialized_start=427
+  _globals['_TOKENREQUEST']._serialized_end=470
+  _globals['_TOKENRESPONSE']._serialized_start=472
+  _globals['_TOKENRESPONSE']._serialized_end=502
+  _globals['_AILOGIC']._serialized_start=505
+  _globals['_AILOGIC']._serialized_end=760
 # @@protoc_insertion_point(module_scope)

@@ -7,15 +7,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ai-gateway/core/internal/config"
+	"github.com/ai-gateway/core/internal/middleware"
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
-	"github.com/ai-gateway/core/internal/middleware"
 	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 // ChatHandler 处理与聊天补全相关的 HTTP 请求。
@@ -24,15 +26,23 @@ type ChatHandler struct {
 	nitroClient        pb.AiLogicClient
 	router             *router.SmartRouter
 	config             *config.Config
+	rdb                *redis.Client // Redis 客户端，用于更新配额
+	semaphore          chan struct{} // 核心层并发保护信号量
 }
 
 // NewChatHandler 创建一个包含所需依赖的 ChatHandler 实例。
-func NewChatHandler(ic pb.AiLogicClient, nc pb.AiLogicClient, sr *router.SmartRouter, cfg *config.Config) *ChatHandler {
+func NewChatHandler(ic pb.AiLogicClient, nc pb.AiLogicClient, sr *router.SmartRouter, rdb *redis.Client, cfg *config.Config) *ChatHandler {
+	limit := cfg.MaxConcurrentRequests
+	if limit <= 0 {
+		limit = 1000
+	}
 	return &ChatHandler{
 		intelligenceClient: ic,
 		nitroClient:        nc,
 		router:             sr,
 		config:             cfg,
+		rdb:                rdb,
+		semaphore:          make(chan struct{}, limit),
 	}
 }
 
@@ -106,22 +116,26 @@ func (h *ChatHandler) asyncCountTokens(rid, text, model string) {
 }
 
 // checkCache 尝试从智能层获取语义缓存。
-// 如果命中缓存，它将直接向客户端返回响应并返回 true。
 func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, prompt, model string) bool {
 	cacheCtx, cancel := context.WithTimeout(ctx, h.config.CacheTimeout)
 	defer cancel()
 
-	cacheResp, err := h.intelligenceClient.GetCache(cacheCtx, &pb.CacheRequest{Prompt: prompt})
+	cacheResp, err := h.intelligenceClient.GetCache(cacheCtx, &pb.CacheRequest{
+		Prompt: prompt,
+		Model:  model,
+	})
 	if err != nil {
 		slog.Warn("缓存服务不可用或超时", "request_id", rid, "error", err)
 		return false
 	}
 
 	if !cacheResp.Hit {
+		observability.CacheHitsTotal.WithLabelValues("miss", model).Inc()
 		return false
 	}
 
 	slog.Info("Cache Hit", "request_id", rid)
+	observability.CacheHitsTotal.WithLabelValues("hit", model).Inc()
 	c.JSON(http.StatusOK, models.ChatCompletionResponse{
 		ID: fmt.Sprintf("cache-%s", rid),
 		Choices: []models.Choice{{
@@ -132,11 +146,8 @@ func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, promp
 	return true
 }
 
-// runGuardrails 执行双阶段安全审计：
-// 1. Nitro (Rust): 极速执行正则表达式脱敏 (PII)。
-// 2. Intelligence (Python): 执行深度语义审计（如提示词注入检测）。
+// runGuardrails 执行双阶段安全审计。
 func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, prompt, model string) (string, bool) {
-	// 阶段 1: Nitro 加速层 (Rust) - 侧重性能
 	nitroCtx, cancelNitro := context.WithTimeout(ctx, h.config.GuardrailNitroTimeout)
 	defer cancelNitro()
 	if rsResp, err := h.nitroClient.CheckInput(nitroCtx, &pb.InputRequest{Prompt: prompt}); err == nil {
@@ -145,13 +156,12 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 		slog.Warn("Nitro guardrail skip due to error", "request_id", rid, "error", err)
 	}
 
-	// 阶段 2: Python 智能层 - 侧重深度审计
 	pyCtx, cancelPy := context.WithTimeout(ctx, h.config.GuardrailIntellTimeout)
 	defer cancelPy()
 	pyResp, err := h.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
 	if err != nil {
 		slog.Error("智能审计服务异常", "request_id", rid, "error", err)
-		return prompt, true // 降级策略：审计服务故障时允许通过
+		return prompt, true 
 	}
 
 	if !pyResp.Safe {
@@ -166,7 +176,6 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 
 // runOutputGuardrails 对模型生成的响应进行安全合规审计。
 func (h *ChatHandler) runOutputGuardrails(ctx context.Context, rid, text, model string) (string, bool) {
-	// 阶段 1: Python 智能层 - 执行输出合规审计（如幻觉、敏感信息检测）
 	pyCtx, cancelPy := context.WithTimeout(ctx, h.config.GuardrailIntellTimeout)
 	defer cancelPy()
 
@@ -178,7 +187,7 @@ func (h *ChatHandler) runOutputGuardrails(ctx context.Context, rid, text, model 
 
 	if !pyResp.Safe {
 		slog.Warn("输出安全拦截", "request_id", rid)
-		return pyResp.SanitizedText, true // 或者返回自定义错误。这里选择返回被脱敏/说明后的文本。
+		return pyResp.SanitizedText, true 
 	}
 
 	return pyResp.SanitizedText, true
@@ -186,7 +195,15 @@ func (h *ChatHandler) runOutputGuardrails(ctx context.Context, rid, text, model 
 
 // streamExecute 执行流式转发逻辑。
 func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {
-	// 1. 路由选择（流式暂不支持重试，因为首字节返回后状态码已发送）
+	// 并发控制：获取令牌
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	case <-ctx.Done():
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "server_busy", "message": "并发请求达到阈值"})
+		return
+	}
+
 	routeCtx := &router.RouteContext{
 		RequestID:    rid,
 		Model:        req.Model,
@@ -201,29 +218,23 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 		return
 	}
 
-	// 2. 调用流式接口
 	respCh, errCh := node.Adapter.ChatCompletionStream(req)
 
-	// 3. 设置 SSE 响应头
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Flush()
 
-	// 4. 流式转发循环
 	slog.Info("流式传输开始", "request_id", rid, "node", node.Name)
-	
 	flusher := c.Writer
-	h.router.Tracker.RecordSuccess(node.Name, 0) // 流式记为成功，延迟统计到结束
+	h.router.Tracker.RecordSuccess(node.Name, 0)
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Warn("客户端断开连接或超时", "request_id", rid)
 			return
 		case err := <-errCh:
 			if err != nil {
-				slog.Error("供应商流损毁", "request_id", rid, "error", err)
 				fmt.Fprintf(c.Writer, "data: {\"error\": \"stream_error\", \"message\": \"%s\"}\n\n", err.Error())
 				return
 			}
@@ -231,10 +242,8 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 			if !ok {
 				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 				flusher.Flush()
-				slog.Info("流式传输完成", "request_id", rid, "duration_ms", time.Since(start).Milliseconds())
 				return
 			}
-
 			data, _ := json.Marshal(streamResp)
 			fmt.Fprintf(c.Writer, "data: %s\n\n", string(data))
 			flusher.Flush()
@@ -243,9 +252,16 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 }
 
 // routeAndExecute 执行智能路由并调用最终的 AI 模型提供商。
-// 路由结果会被反馈到 HealthTracker 以更新节点健康状态。
-// P1 阶段重构：增加了基于排除列表的循环重试逻辑。
 func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *models.ChatCompletionRequest, rid string, start time.Time) {
+	// 并发控制：获取令牌
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	case <-ctx.Done():
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "server_busy", "message": "并发请求达到阈值"})
+		return
+	}
+
 	var excluded []string
 	maxRetries := h.config.MaxRetries
 	if maxRetries < 0 {
@@ -253,41 +269,53 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 	}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// 1. 构造路由上下文。
+		// 指数退避重试 (从第二次尝试开始)
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
+			slog.Info("等待重试", "request_id", rid, "backoff_ms", backoff.Milliseconds())
+			
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+		}
+
 		routeCtx := &router.RouteContext{
 			RequestID:    rid,
 			Model:        req.Model,
 			PromptTokens: len(h.extractPrompt(req)) / h.config.TokenEstimationFactor,
 			UserTier:     c.GetString("key_label"),
-			Headers: map[string]string{
-				"X-Route-Strategy": c.GetHeader("X-Route-Strategy"),
-			},
+			Headers:      map[string]string{"X-Route-Strategy": c.GetHeader("X-Route-Strategy")},
 			ExcludeNodes: excluded,
 		}
 
-		// 2. 路由选择。
 		node, err := h.router.Route(routeCtx)
 		if err != nil {
-			slog.Error("路由失败", "request_id", rid, "attempt", attempt, "error", err)
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "routing_error", "message": err.Error()})
 			observability.RequestsTotal.WithLabelValues("503", req.Model).Inc()
 			return
 		}
 
-		if attempt > 0 {
-			slog.Info("正在重试路由", "request_id", rid, "attempt", attempt, "next_node", node.Name)
-		} else {
-			slog.Info("路由分配", "request_id", rid, "node", node.Name, "model_id", node.ModelID)
-		}
+		slog.Info("路由调用", "request_id", rid, "node", node.Name, "attempt", attempt)
 
-		// 3. 执行供应商调用。
 		callStart := time.Now()
 		resp, err := node.Adapter.ChatCompletion(req)
 		callDuration := time.Since(callStart)
 
 		if err != nil {
 			h.router.Tracker.RecordFailure(node.Name)
-			slog.Error("供应商调用失败", "request_id", rid, "node", node.Name, "error", err)
+			slog.Error("调用失败", "request_id", rid, "node", node.Name, "error", err)
+
+			// 记录 Provider 维度错误指标 (3.2)
+			errType := "other"
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "deadline") {
+				errType = "timeout"
+			} else if strings.Contains(errMsg, "429") || strings.Contains(errMsg, "rate") {
+				errType = "rate_limit"
+			}
+			observability.ProviderErrors.WithLabelValues(node.Name, errType).Inc()
 
 			if attempt < maxRetries {
 				excluded = append(excluded, node.Name)
@@ -299,23 +327,23 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 			return
 		}
 
-		// 4. 记录调用反馈。
 		h.router.Tracker.RecordSuccess(node.Name, callDuration)
 
-		// 5. 执行输出审计 (Output Guardrails)。
-		finalText := resp.Choices[0].Message.Content
+		// 记录配额消耗 (根据 Token 数更新 Redis)
+		if apiKey := c.GetString("api_key"); apiKey != "" && resp.Usage.TotalTokens > 0 {
+			go middleware.UpdateQuotaUsage(context.Background(), h.rdb, apiKey, int64(resp.Usage.TotalTokens))
+		}
+
 		if len(resp.Choices) > 0 {
-			auditedText, _ := h.runOutputGuardrails(ctx, rid, finalText, node.ModelID)
+			auditedText, _ := h.runOutputGuardrails(ctx, rid, resp.Choices[0].Message.Content, node.ModelID)
 			resp.Choices[0].Message.Content = auditedText
 		}
 
-		// 6. 记录指标并返回。
 		duration := time.Since(start)
 		observability.Latency.WithLabelValues(req.Model).Observe(duration.Seconds())
-		observability.NodeLatency.WithLabelValues(node.Name).Observe(callDuration.Seconds())
 		observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
 
-		slog.Info("请求完成", "request_id", rid, "node", node.Name, "duration_ms", duration.Milliseconds(), "attempts", attempt+1)
+		slog.Info("请求完成", "request_id", rid, "duration_ms", duration.Milliseconds())
 		c.JSON(http.StatusOK, resp)
 		return
 	}

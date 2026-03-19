@@ -82,7 +82,7 @@ func main() {
 	)
 
 	// 5. 初始化业务组件与 HTTP 服务：
-	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, cfg)
+	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, rdb, cfg)
 	adminHandler := handlers.NewAdminHandler(sr)
 	routerEngine := routes.NewRouter(chatHandler, adminHandler, rdb, cfg)
 
