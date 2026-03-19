@@ -63,8 +63,9 @@ func AuthRequired(keys []config.APIKeyEntry) gin.HandlerFunc {
 			return
 		}
 
-		// 注入 Key 标签，供后续中间件（如限流）使用
+		// 注入 Key 信息，供后续中间件（如限流、配额管理）使用
 		c.Set("key_label", matchedKey.Label)
+		c.Set("api_key", matchedKey.Key)
 		observability.AuthTotal.WithLabelValues("success", "").Inc()
 		c.Next()
 	}

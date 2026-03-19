@@ -50,6 +50,7 @@ message OutputResponse {
 // CacheRequest 语义缓存查询请求。
 message CacheRequest {
   string prompt = 1; // 当前请求的提示词，用于计算向量相似度。
+  string model = 2;  // 模型名称，用于物理隔离。
 }
 
 // CacheResponse 语义缓存查询结果。

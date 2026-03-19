@@ -41,7 +41,7 @@ EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
 # Global Vector Database State.
 VECTOR_DIMENSION = 384
 FAISS_INDEX = faiss.IndexFlatL2(VECTOR_DIMENSION)
-CACHE_STORE: List[Tuple[str, str]] = []
+CACHE_STORE: List[Tuple[str, str, str]] = [] # (prompt, response, model)
 cache_lock = threading.Lock()
 
 # Asynchronous persistence queue.
@@ -84,7 +84,14 @@ def load_cache():
         try:
             FAISS_INDEX = faiss.read_index(INDEX_PATH)
             with open(STORE_PATH, 'r', encoding='utf-8') as f:
-                CACHE_STORE = [tuple(item) for item in json.load(f)]
+                raw_data = json.load(f)
+                # 兼容旧版 (2-tuple) 和新版 (3-tuple)
+                CACHE_STORE = []
+                for item in raw_data:
+                    if len(item) == 2:
+                        CACHE_STORE.append((item[0], item[1], "any"))
+                    else:
+                        CACHE_STORE.append(tuple(item))
             logger.info("已从磁盘加载 %d 条缓存记录", len(CACHE_STORE))
         except Exception as e:
             logger.error("加载缓存失败: %s", e)
@@ -165,11 +172,12 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
     def GetCache(self, request: gateway_pb2.CacheRequest, 
                  context: grpc.ServicerContext) -> gateway_pb2.CacheResponse:
-        """使用向量相似度执行语义缓存搜索。"""
+        """使用向量相似度执行语义缓存搜索，增加模型隔离校验。"""
         rid = get_request_id(context)
-        logger.info("[RID:%s] 正在搜索语义缓存", rid)
+        logger.info("[RID:%s] 正在搜索语义缓存 (Model: %s)", rid, request.model)
         
         prompt = request.prompt
+        target_model = request.model
         if not prompt:
             return gateway_pb2.CacheResponse(hit=False)
 
@@ -181,33 +189,37 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
             if FAISS_INDEX.ntotal == 0:
                 pass # 后续进入模拟逻辑
             else:
-                distances, indices = FAISS_INDEX.search(embedding, 1)
-                # L2 距离阈值：< 0.2 表示语义极度相似
-                if distances[0][0] < 0.2:
-                    match_idx = indices[0][0]
-                    logger.info("[RID:%s] 语义缓存命中 (距离: %.4f)", rid, distances[0][0])
-                    _, cached_response = CACHE_STORE[match_idx]
-                    return gateway_pb2.CacheResponse(hit=True, response=cached_response)
+                # 检索 Top-5 以在不同模型间找到匹配项
+                K = min(5, FAISS_INDEX.ntotal)
+                distances, indices = FAISS_INDEX.search(embedding, K)
+                
+                for dist, idx in zip(distances[0], indices[0]):
+                    if dist < 0.2:
+                        _, cached_resp, cached_model = CACHE_STORE[idx]
+                        if cached_model == "any" or cached_model == target_model:
+                            logger.info("[RID:%s] 语义缓存命中 (距离: %.4f, 来源: %s)", 
+                                        rid, dist, cached_model)
+                            return gateway_pb2.CacheResponse(hit=True, response=cached_resp)
 
         # 2. 模拟/测试逻辑
-        self._handle_mock_cache(prompt, rid)
+        self._handle_mock_cache(prompt, target_model, rid)
 
         logger.info("[RID:%s] 语义缓存未命中", rid)
         return gateway_pb2.CacheResponse(hit=False)
 
-    def _handle_mock_cache(self, prompt: str, rid: str):
+    def _handle_mock_cache(self, prompt: str, model: str, rid: str):
         """处理模拟/测试用的缓存项。"""
         if "what is 1+1" in prompt.lower():
             logger.info("[RID:%s] 正在为 '1+1' 构建模拟缓存响应", rid)
-            self._add_to_cache(prompt, "答案是 2。")
+            self._add_to_cache(prompt, "答案是 2。", model)
 
-    def _add_to_cache(self, prompt: str, response: str):
+    def _add_to_cache(self, prompt: str, response: str, model: str):
         """将新条目添加到语义索引并异步持久化。"""
         embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
         
         with cache_lock:
             FAISS_INDEX.add(embedding)
-            CACHE_STORE.append((prompt, response))
+            CACHE_STORE.append((prompt, response, model))
         
         # 通知后台线程进行保存。
         PERSISTENCE_QUEUE.put(True)

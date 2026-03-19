@@ -26,7 +26,8 @@ if _version_not_supported:
 
 
 class AiLogicStub(object):
-    """Missing associated documentation comment in .proto file."""
+    """AiLogic 定义了 AI 网关与周边智能/加速层之间的核心通信接口。
+    """
 
     def __init__(self, channel):
         """Constructor.
@@ -57,31 +58,35 @@ class AiLogicStub(object):
 
 
 class AiLogicServicer(object):
-    """Missing associated documentation comment in .proto file."""
+    """AiLogic 定义了 AI 网关与周边智能/加速层之间的核心通信接口。
+    """
 
     def CheckInput(self, request, context):
-        """Input Guardrail: Detect PII and check for prompt injection
+        """CheckInput 执行输入侧的安全审计与脱敏。
+        负责 PII（敏感个人信息）识别、提示词注入（Prompt Injection）检测等功能。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def CheckOutput(self, request, context):
-        """Output Guardrail: Detect hallucinations or sensitive data leakage
+        """CheckOutput 执行输出侧的安全审计与内容合规检查。
+        用于识别潜在的 AI 幻觉、敏感信息泄露或违反内容策略的响应。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def GetCache(self, request, context):
-        """Semantic Cache Check
+        """GetCache 语义级缓存检查。
+        基于向量相似度匹配，返回最接近的历史回答以降低消耗并提升响应速度。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def CountTokens(self, request, context):
-        """Token Counting (Nitro)
+        """CountTokens 统计请求或响应的 Token 消耗（由 Rust 侧 Nitro 引擎提供支持）。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -119,7 +124,8 @@ def add_AiLogicServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class AiLogic(object):
-    """Missing associated documentation comment in .proto file."""
+    """AiLogic 定义了 AI 网关与周边智能/加速层之间的核心通信接口。
+    """
 
     @staticmethod
     def CheckInput(request,

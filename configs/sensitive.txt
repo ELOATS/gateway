@@ -1,0 +1,8 @@
+# AI 网关敏感词库 (PII/Sensitive Words)
+# 支持正则表达式，每行一个。
+# 请务必确保正则语法正确。
+
+[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+\d{3}-\d{2}-\d{4}
+(password|secret|key)\s*[:=]\s*[^\s]+
+admin@company.com

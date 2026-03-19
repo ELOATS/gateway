@@ -39,7 +39,7 @@ func TestChatHandler_HandleChatCompletions_Basic(t *testing.T) {
 	sr := router.NewSmartRouter(nil, nil, "weighted")
 	
 	// 这里通常需要 Mock gRPC Client，为保持示例简洁，此处暂不依赖真实 gRPC
-	h := NewChatHandler(nil, nil, sr, cfg)
+	h := NewChatHandler(nil, nil, sr, nil, cfg)
 	if h == nil {
 		t.Fatal("NewChatHandler 返回了 nil")
 	}
