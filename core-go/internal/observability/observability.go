@@ -109,6 +109,20 @@ var (
 		Help: "语义缓存命中/未命中总数",
 	}, []string{"status", "model"})
 
+	// TTFT 记录流式响应的首字到达时间 (Time To First Token)。
+	TTFT = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gateway_ttft_seconds",
+		Help:    "流式请求首字到达时间",
+		Buckets: []float64{0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0},
+	}, []string{"model", "node"})
+
+	// TPS 记录流式响应的 Token 生成速度 (Tokens Per Second)。
+	TPS = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gateway_tps",
+		Help:    "流式请求 Token 生成速度",
+		Buckets: prometheus.LinearBuckets(10, 10, 10), // 从 10 开始，步长 10，共 10 个桶
+	}, []string{"model", "node"})
+
 	// CircuitBreakerChanges 统计熔断器状态转换次数。
 	CircuitBreakerChanges = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_circuit_breaker_changes_total",

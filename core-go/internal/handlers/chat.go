@@ -229,6 +229,17 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 	flusher := c.Writer
 	h.router.Tracker.RecordSuccess(node.Name, 0)
 
+	firstTokenReceived := false
+	var firstTokenTime time.Time
+	streamStart := time.Now()
+	chunkCount := 0
+	fullResponse := ""
+
+	// 流式滑动窗口：最多保留最近 100 个字符进行连续性敏感审查
+	slidingWindow := ""
+	maxWindowSize := 100
+	blacklist := []string{"ignore previous", "forget all instructions", "system prompt", "大语言模型不能"}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -242,8 +253,62 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 			if !ok {
 				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 				flusher.Flush()
+				
+				// 计算并记录流式吞吐量 TPS (Chunk/s 作为简化估算)
+				if firstTokenReceived {
+					duration := time.Since(firstTokenTime).Seconds()
+					if duration > 0.1 { // 避免分母过小导致极值
+						tps := float64(chunkCount) / duration
+						observability.TPS.WithLabelValues(req.Model, node.Name).Observe(tps)
+					}
+				}
+				
+				// 异步落盘流式完整内容
+				if observability.GlobalAuditLogger != nil {
+					observability.GlobalAuditLogger.Log(&observability.AuditRecord{
+						Timestamp: time.Now(),
+						RequestID: rid,
+						APIKey:    c.GetString("api_key"),
+						Model:     req.Model,
+						Node:      node.Name,
+						Prompt:    h.extractPrompt(req),
+						Response:  fullResponse,
+						Tokens:    chunkCount,
+					})
+				}
+				
 				return
 			}
+
+			// 记录 TTFT
+			if !firstTokenReceived {
+				firstTokenTime = time.Now()
+				ttft := firstTokenTime.Sub(streamStart).Seconds()
+				observability.TTFT.WithLabelValues(req.Model, node.Name).Observe(ttft)
+				firstTokenReceived = true
+			}
+
+			// 统计 Chunk 以估算 Token 数量并进行滑动窗口审查
+			if len(streamResp.Choices) > 0 && streamResp.Choices[0].Delta.Content != "" {
+				chunkCount++
+				content := streamResp.Choices[0].Delta.Content
+				fullResponse += content
+				slidingWindow += content
+				if len(slidingWindow) > maxWindowSize {
+					slidingWindow = slidingWindow[len(slidingWindow)-maxWindowSize:]
+				}
+
+				// 审查并实时阻断
+				for _, badWord := range blacklist {
+					if strings.Contains(strings.ToLower(slidingWindow), badWord) {
+						slog.Warn("流式审查命中违规词汇，强行中断流", "request_id", rid, "bad_word", badWord)
+						fmt.Fprintf(c.Writer, "data: {\"error\": \"moderation_triggered\", \"message\": \"[内容检测中止：触发流式安全防护]\"}\n\n")
+						flusher.Flush()
+						return // 强行退出 goroutine，关闭连接
+					}
+				}
+			}
+
 			data, _ := json.Marshal(streamResp)
 			fmt.Fprintf(c.Writer, "data: %s\n\n", string(data))
 			flusher.Flush()
@@ -344,6 +409,25 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 		observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
 
 		slog.Info("请求完成", "request_id", rid, "duration_ms", duration.Milliseconds())
+		
+		// 异步合规审计落盘
+		if observability.GlobalAuditLogger != nil {
+			var respText string
+			if len(resp.Choices) > 0 {
+				respText = resp.Choices[0].Message.Content
+			}
+			observability.GlobalAuditLogger.Log(&observability.AuditRecord{
+				Timestamp: time.Now(),
+				RequestID: rid,
+				APIKey:    c.GetString("api_key"),
+				Model:     req.Model,
+				Node:      node.Name,
+				Prompt:    h.extractPrompt(req),
+				Response:  respText,
+				Tokens:    resp.Usage.TotalTokens,
+			})
+		}
+		
 		c.JSON(http.StatusOK, resp)
 		return
 	}

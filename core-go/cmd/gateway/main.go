@@ -39,6 +39,13 @@ func main() {
 	}
 	defer shutdownTracer()
 
+	// 初始化合规审计下沉服务
+	if err := observability.InitGlobalAuditLogger("audit_compliance.log"); err != nil {
+		slog.Warn("合规日志初始化失败，继续启动但无持久化能力", "error", err)
+	} else {
+		slog.Info("全量合规审计模块已上线，落盘至: audit_compliance.log")
+	}
+
 	// 初始化 Redis 客户端。
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.RedisAddr,
@@ -83,7 +90,7 @@ func main() {
 
 	// 5. 初始化业务组件与 HTTP 服务：
 	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, rdb, cfg)
-	adminHandler := handlers.NewAdminHandler(sr)
+	adminHandler := handlers.NewAdminHandler(sr, rdb)
 	routerEngine := routes.NewRouter(chatHandler, adminHandler, rdb, cfg)
 
 	srv := &http.Server{
@@ -115,6 +122,10 @@ func main() {
 
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("服务器强制关闭", "error", err)
+	}
+
+	if observability.GlobalAuditLogger != nil {
+		observability.GlobalAuditLogger.Close(ctx)
 	}
 
 	slog.Info("服务器已退出")

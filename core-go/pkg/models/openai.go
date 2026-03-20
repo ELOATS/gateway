@@ -7,6 +7,21 @@ type ChatCompletionRequest struct {
 	Messages    []Message `json:"messages"`    // 聊天消息列表。
 	Temperature float64   `json:"temperature,omitempty"` // 采样温度。
 	Stream      bool      `json:"stream,omitempty"`      // 是否开启流式响应。
+	Tools       []Tool    `json:"tools,omitempty"`       // Agent 工具列表
+	ToolChoice  any       `json:"tool_choice,omitempty"` // 工具选择策略
+}
+
+// Tool 表示大语言模型可以调用的一个工具/函数。
+type Tool struct {
+	Type     string       `json:"type"` // 例如 "function"
+	Function FunctionCall `json:"function"`
+}
+
+// FunctionCall 描述 Function 工具的签名。
+type FunctionCall struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
 }
 
 // Message 表示聊天对话中的单条消息。
