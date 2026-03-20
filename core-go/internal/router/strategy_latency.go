@@ -30,6 +30,9 @@ func (s *LatencyStrategy) Select(ctx *RouteContext, nodes []*ModelNode) *ModelNo
 		// 从未被调用过的节点赋予极低延迟以优先尝试（探索机制）。
 		if health.TotalRequests == 0 {
 			lat = 0.001
+		} else if health.ErrorRate > 0 {
+			// 引入基于实时错误率的延迟惩罚：错误率越高，虚拟计算延迟呈指数或常数级放大，减少该节点的流量分配。
+			lat = lat * (1.0 + health.ErrorRate*5.0)
 		}
 
 		if lat < bestAnyLatency {

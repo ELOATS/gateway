@@ -15,6 +15,9 @@ func NewRouter(h *handlers.ChatHandler, ah *handlers.AdminHandler, rdb *redis.Cl
 	r := gin.Default()
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
+	// 提供控制台静态资源面板
+	r.Static("/dashboard", "./dashboard")
+
 	// 健康检查端点：
 	// /healthz 用于 Liveness 探针，仅表示进程存活。
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"status": "alive"}) })
@@ -28,6 +31,7 @@ func NewRouter(h *handlers.ChatHandler, ah *handlers.AdminHandler, rdb *redis.Cl
 	v1.Use(middleware.AuthRequired(cfg.APIKeys))
 	v1.Use(middleware.RateLimiter(rdb, cfg.RateLimitQPS, cfg.RateLimitBurst))
 	v1.Use(middleware.QuotaLimiter(rdb, cfg))
+	v1.Use(middleware.ToolAuthMiddleware()) // 面向 Agent / MCP 生态：统一隔离非授权环境下的工具调用。
 	{
 		v1.POST("/chat/completions", h.HandleChatCompletions)
 	}
@@ -47,6 +51,8 @@ func NewRouter(h *handlers.ChatHandler, ah *handlers.AdminHandler, rdb *redis.Cl
 	{
 		admin.GET("/nodes", ah.ListNodes)
 		admin.GET("/strategies", ah.ListStrategies)
+		admin.POST("/nodes/:name/weight", ah.UpdateNodeWeight)
+		admin.POST("/quota/reset", ah.ResetQuota)
 	}
 
 	return r

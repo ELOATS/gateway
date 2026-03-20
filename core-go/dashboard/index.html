@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Gateway Admin Panel</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --bg-panel: rgba(30, 41, 59, 0.7);
+            --border: rgba(255, 255, 255, 0.1);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --success: #10b981;
+            --danger: #ef4444;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            background-image: radial-gradient(circle at top right, rgba(59, 130, 246, 0.15), transparent 40%),
+                              radial-gradient(circle at bottom left, rgba(16, 185, 129, 0.1), transparent 40%);
+            background-attachment: fixed;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin: 0;
+        }
+        .auth-bar {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        input.input-field {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            outline: none;
+            backdrop-filter: blur(10px);
+            transition: border-color 0.3s ease;
+        }
+        input.input-field:focus {
+            border-color: var(--accent);
+        }
+        button.btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.5rem 1.2rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+        button.btn:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+        .card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 4px 24px -1px rgba(0,0,0,0.5);
+            margin-bottom: 2rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        th, td {
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .healthy { background: var(--success); box-shadow: 0 0 8px var(--success); }
+        .unhealthy { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+        .weight-input {
+            width: 60px;
+            text-align: center;
+        }
+        .badge {
+            font-size: 0.75rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.1);
+        }
+        #toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: var(--bg-panel);
+            border: 1px solid var(--success);
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            backdrop-filter: blur(8px);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+        #toast.show { opacity: 1; pointer-events: auto; }
+        #toast.error { border-color: var(--danger); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>✦ AI Gateway Control Plane</h1>
+            <div class="auth-bar">
+                <input type="password" id="apiKey" class="input-field" placeholder="Admin API Key">
+                <button class="btn" onclick="fetchNodes()">Connect & Refresh</button>
+            </div>
+        </header>
+
+        <div class="card">
+            <h2>🌍 Model Nodes Status</h2>
+            <p style="color: var(--text-muted); font-size: 0.9rem;">View real-time node health, dynamic weights, and routing latencies.</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Node Name</th>
+                        <th>Health State</th>
+                        <th>EWMA Latency</th>
+                        <th>Error Rate</th>
+                        <th>Total Req</th>
+                        <th>Dynamic Weight</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="nodesBody">
+                    <tr><td colspan="7" style="text-align:center; color: var(--text-muted)">Please enter Admin Key to connect.</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>⚡ Quick Actions</h2>
+            <div style="display: flex; gap: 1rem; align-items: center; margin-top: 1rem;">
+                <input type="text" id="quotaKey" class="input-field" placeholder="Target API Key">
+                <button class="btn" onclick="resetQuota()">Reset Daily Quota</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast">✅ Action Successful</div>
+
+    <script>
+        function showToast(msg, isError = false) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = isError ? 'error show' : 'show';
+            setTimeout(() => t.className = '', 3000);
+        }
+
+        function getHeaders() {
+            return {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': 'Bearer ' + document.getElementById('apiKey').value
+            };
+        }
+
+        async function fetchNodes() {
+            try {
+                const res = await fetch('/admin/nodes', { headers: getHeaders() });
+                if (!res.ok) throw new Error('Auth failed or Server Error');
+                const data = await res.json();
+                
+                const tbody = document.getElementById('nodesBody');
+                tbody.innerHTML = '';
+                
+                data.nodes.forEach(n => {
+                    const healthClass = n.status.error_rate < 0.5 && n.status.is_healthy ? 'healthy' : 'unhealthy';
+                    const healthText = n.status.state_name;
+                    // Note: If you want exactly the weight, the API could return it. Here we use an input.
+                    
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td><strong>${n.name}</strong></td>
+                        <td><span class="status-dot ${healthClass}"></span> ${healthText}</td>
+                        <td><span class="badge">${(n.status.avg_latency * 1000).toFixed(1)} ms</span></td>
+                        <td><span class="badge" style="color: ${n.status.error_rate>0? 'var(--danger)':'inherit'}">${(n.status.error_rate * 100).toFixed(1)}%</span></td>
+                        <td>${n.status.total_requests}</td>
+                        <td><input type="number" id="w_${n.name}" class="input-field weight-input" value="100" min="0"></td>
+                        <td><button class="btn" style="padding: 0.3rem 0.8rem; font-size: 0.8rem" onclick="updateWeight('${n.name}')">Save</button></td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                showToast('Nodes synced successfully!');
+            } catch (err) {
+                showToast(err.message, true);
+            }
+        }
+
+        async function updateWeight(nodeName) {
+            const w = document.getElementById('w_' + nodeName).value;
+            const body = new URLSearchParams({'weight': w});
+            try {
+                const res = await fetch(`/admin/nodes/${encodeURIComponent(nodeName)}/weight`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: body
+                });
+                if (!res.ok) throw new Error('Update failed');
+                showToast(`Weight for ${nodeName} updated to ${w}`);
+                fetchNodes();
+            } catch (err) {
+                showToast(err.message, true);
+            }
+        }
+
+        async function resetQuota() {
+            const k = document.getElementById('quotaKey').value;
+            if(!k) return showToast('Please enter an API Key', true);
+            const body = new URLSearchParams({'api_key': k});
+            try {
+                const res = await fetch(`/admin/quota/reset`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: body
+                });
+                if (!res.ok) throw new Error('Reset failed');
+                showToast(`Quota for ${k} has been reset.`);
+            } catch (err) {
+                showToast(err.message, true);
+            }
+        }
+    </script>
+</body>
+</html>
