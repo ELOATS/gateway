@@ -59,7 +59,7 @@ jobs:
       - name: Test
         run: |
           cd utils-rust
-          cargo test --verbose
+          RUST_MIN_STACK=8388608 cargo test --verbose -- --test-threads=1
 
   python-ci:
     name: Python Logic (Intelligence)
