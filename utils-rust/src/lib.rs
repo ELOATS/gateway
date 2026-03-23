@@ -4,7 +4,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use tiktoken_rs::{cl100k_base, p50k_base, r50k_base, CoreBPE};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
