@@ -141,12 +141,28 @@ pub mod service_impl {
 mod tests {
     use super::*;
 
+    use std::io::Write;
     #[test]
     fn test_bpe_initialization() {
-        // 尝试初始化 BPE 编译器，观察是否在 CI 环境下触发 SIGSEGV
-        println!("Initializing BPE_CL100K...");
+        println!("DEBUG: Starting test_bpe_initialization");
+        let _ = std::io::stdout().flush();
+
+        println!("DEBUG: Checking RUST_MIN_STACK...");
+        if let Ok(val) = std::env::var("RUST_MIN_STACK") {
+            println!("DEBUG: RUST_MIN_STACK={}", val);
+        } else {
+            println!("DEBUG: RUST_MIN_STACK not set");
+        }
+        let _ = std::io::stdout().flush();
+
+        println!("DEBUG: Initializing BPE_CL100K...");
+        let _ = std::io::stdout().flush();
+        
+        // Attempt initialization
         let len = BPE_CL100K.encode_with_special_tokens("test").len();
+        println!("DEBUG: BPE_CL100K initialized successfully, len={}", len);
+        let _ = std::io::stdout().flush();
+        
         assert!(len > 0);
-        println!("BPE_CL100K initialized successfully.");
     }
 }
