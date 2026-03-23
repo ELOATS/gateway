@@ -1,11 +1,10 @@
 //! Nitro 平面 (Rust) - Wasm Core (Unknown-Unknown)
 //! 专注于跨语言、进程内的高性能脱敏与分词算子。
 
-use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tiktoken_rs::{cl100k_base, p50k_base, r50k_base, CoreBPE};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -28,9 +27,9 @@ pub struct CompiledRule {
 // --- 全局静态状态 (Lazy Initialization) ---
 
 /// SENSITIVE_RULES 存储了当前的脱敏规则池。
-/// 使用 ArcSwap 实现“读多写极少”场景下的零锁/原子化热更新。
-pub static SENSITIVE_RULES: Lazy<ArcSwap<Vec<CompiledRule>>> = Lazy::new(|| {
-    ArcSwap::from_pointee(vec![])
+/// 使用 RwLock 实现读写分离的并发访问。
+pub static SENSITIVE_RULES: Lazy<RwLock<Vec<CompiledRule>>> = Lazy::new(|| {
+    RwLock::new(vec![])
 });
 
 /// BPE 编码器单例。
@@ -79,8 +78,10 @@ pub extern "C" fn set_sensitive_rules_wasm(rules_ptr: *const c_char) {
                 replacement: r.replacement,
             })
             .collect();
-        // 原子化替换全局规则库。
-        SENSITIVE_RULES.store(Arc::new(compiled));
+        // 加锁更新
+        if let Ok(mut rules) = SENSITIVE_RULES.write() {
+            *rules = compiled;
+        }
     }
 }
 
@@ -109,10 +110,11 @@ pub extern "C" fn check_input_wasm(prompt_ptr: *const c_char) -> *mut c_char {
     let prompt = unsafe { CStr::from_ptr(prompt_ptr).to_string_lossy() };
     let mut sanitized = prompt.into_owned();
     
-    let rules = SENSITIVE_RULES.load();
-    for rule in rules.iter() {
-        // 使用正则执行批量替换。
-        sanitized = rule.pattern.replace_all(&sanitized, &rule.replacement).to_string();
+    if let Ok(rules) = SENSITIVE_RULES.read() {
+        for rule in rules.iter() {
+            // 使用正则执行批量替换。
+            sanitized = rule.pattern.replace_all(&sanitized, &rule.replacement).to_string();
+        }
     }
     
     // 将 Rust String 包装为 CString 并导出为原始指针。
