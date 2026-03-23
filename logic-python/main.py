@@ -2,148 +2,83 @@ import concurrent.futures
 import json
 import logging
 import os
-import queue
-import threading
-import time
-from typing import List, Tuple
+import uuid
+from typing import List, Tuple, Optional
 
-import faiss
 import grpc
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+from qdrant_client.models import PointStruct, VectorParams, Distance, Filter, FieldCondition, MatchValue
 from dotenv import load_dotenv
 
 import gateway_pb2
 import gateway_pb2_grpc
 
-# Load shared environment variables.
-# Search in current, parent, and parent's parent directory.
+# 加载环境变量
 load_dotenv(dotenv_path=".env")
 load_dotenv(dotenv_path="../.env")
-load_dotenv(dotenv_path="../../.env")
 
-# Configure logging to show info by default.
+# 日志配置
 logging.basicConfig(
     level=logging.INFO,
     format='{"time":"%(asctime)s", "level":"%(levelname)s", "message":"%(message)s"}'
 )
 logger = logging.getLogger(__name__)
 
-# Constants for persistence.
-CACHE_DIR = "data"
-INDEX_PATH = os.path.join(CACHE_DIR, "vector.index")
-STORE_PATH = os.path.join(CACHE_DIR, "cache_store.json")
+# --- Qdrant 配置 ---
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "ai_gateway_cache")
 
-# Initialize embedding model.
-logger.info("Loading embedding model (all-MiniLM-L6-v2)...")
+# 初始化 Embedding 模型
+logger.info("正在加载 Embedding 模型 (all-MiniLM-L6-v2)...")
 EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
-
-# Global Vector Database State.
 VECTOR_DIMENSION = 384
-FAISS_INDEX = faiss.IndexFlatL2(VECTOR_DIMENSION)
-CACHE_STORE: List[Tuple[str, str, str]] = [] # (prompt, response, model)
-cache_lock = threading.Lock()
 
-# Asynchronous persistence queue.
-PERSISTENCE_QUEUE = queue.Queue()
+# 初始化 Qdrant 客户端 (云原生，无状态)
+qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 
-
-def persistence_worker():
-    """Background thread that persists cache to disk upon update."""
-    logger.info("Persistence background worker started.")
-    while True:
-        try:
-            # Wait for a "dirty" signal.
-            _ = PERSISTENCE_QUEUE.get()
-            
-            # De-duplicate quick updates: wait briefly to see if more come in.
-            time.sleep(1) 
-            while not PERSISTENCE_QUEUE.empty():
-                PERSISTENCE_QUEUE.get_nowait()
-            
-            # Trigger the save.
-            save_cache()
-            
-            PERSISTENCE_QUEUE.task_done()
-        except Exception as e:
-            logger.error("Error in persistence worker: %s", e)
-
-
-def load_cache():
-    """从磁盘加载持久化缓存（如果存在）。"""
-    global FAISS_INDEX, CACHE_STORE
-    
-    if not os.path.exists(CACHE_DIR):
-        os.makedirs(CACHE_DIR)
-        return
-
-    if not (os.path.exists(INDEX_PATH) and os.path.exists(STORE_PATH)):
-        return
-
-    with cache_lock:
-        try:
-            FAISS_INDEX = faiss.read_index(INDEX_PATH)
-            with open(STORE_PATH, 'r', encoding='utf-8') as f:
-                raw_data = json.load(f)
-                # 兼容旧版 (2-tuple) 和新版 (3-tuple)
-                CACHE_STORE = []
-                for item in raw_data:
-                    if len(item) == 2:
-                        CACHE_STORE.append((item[0], item[1], "any"))
-                    else:
-                        CACHE_STORE.append(tuple(item))
-            logger.info("已从磁盘加载 %d 条缓存记录", len(CACHE_STORE))
-        except Exception as e:
-            logger.error("加载缓存失败: %s", e)
-
-
-def save_cache():
-    """将缓存持久化到磁盘。"""
-    with cache_lock:
-        if not os.path.exists(CACHE_DIR):
-            os.makedirs(CACHE_DIR)
-        try:
-            faiss.write_index(FAISS_INDEX, INDEX_PATH)
-            with open(STORE_PATH, 'w', encoding='utf-8') as f:
-                json.dump(CACHE_STORE, f, ensure_ascii=False, indent=2)
-            logger.info("已将缓存保存到磁盘（共 %d 条）", len(CACHE_STORE))
-        except Exception as e:
-            logger.error("保存缓存失败: %s", e)
-
+def ensure_collection():
+    """确保 Qdrant 集合存在。"""
+    try:
+        collections = qdrant_client.get_collections().collections
+        exists = any(c.name == QDRANT_COLLECTION for c in collections)
+        if not exists:
+            logger.info("创建 Qdrant 集合: %s", QDRANT_COLLECTION)
+            qdrant_client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
+            )
+    except Exception as e:
+        logger.error("连接 Qdrant 失败 (请确保 Qdrant 服务已启动): %s", e)
 
 def get_request_id(context: grpc.ServicerContext) -> str:
-    """Extracts x-request-id from gRPC metadata.
-
-    Args:
-        context: The gRPC servicer context.
-
-    Returns:
-        The request ID string or 'unknown'.
-    """
     metadata = dict(context.invocation_metadata())
-    return metadata.get('x-request-id', 'unknown')
-
+	# 兼容不同的 Header 键名
+    return metadata.get('x-request-id') or metadata.get('request-id') or 'unknown'
 
 class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
-    """Provides advanced AI-driven logic with traceability."""
+    """分布式智能审计服务。"""
 
     def CheckInput(self, request: gateway_pb2.InputRequest, 
                    context: grpc.ServicerContext) -> gateway_pb2.InputResponse:
-        """检查输入安全性并执行脱敏。"""
         rid = get_request_id(context)
-        logger.info("[RID:%s] 正在执行输入安全审计", rid)
+        logger.info("[RID:%s] 正在执行分布式输入审计", rid)
         
         prompt = request.prompt
         sanitized = prompt
-
+        
+        # 模拟敏感词逻辑
         if "admin@company.com" in prompt:
-            sanitized = sanitized.replace("admin@company.com", "[EMAIL_MASKED]")
+            sanitized = sanitized.replace("admin@company.com", "[EMAIL_HIDDEN]")
 
         is_safe = True
         block_reason = ""
         if "ignore all previous instructions" in prompt.lower():
             is_safe = False
-            block_reason = "安全拦截：检测到潜在的提示词注入攻击。"
+            block_reason = "安全拦截: 检测到潜在的 Prompt Injection 攻击。"
 
         return gateway_pb2.InputResponse(
             safe=is_safe,
@@ -153,95 +88,95 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
     def CheckOutput(self, request: gateway_pb2.OutputRequest, 
                     context: grpc.ServicerContext) -> gateway_pb2.OutputResponse:
-        """检查响应内容的安全性（如幻觉检测）。"""
         rid = get_request_id(context)
-        logger.info("[RID:%s] 正在执行输出内容审计", rid)
+        logger.info("[RID:%s] 正在执行分布式输出审计", rid)
         
         text = request.response_text
-        is_safe = True
-        sanitized_text = text
+        is_safe = "contradictory" not in text.lower()
+        sanitized_text = text if is_safe else "[内容拦截: 检测到逻辑矛盾]"
 
-        if "contradictory" in text.lower():
-            is_safe = False
-            sanitized_text = "[内容拦截：检测到潜在的逻辑自相矛盾/幻觉]"
-
-        return gateway_pb2.OutputResponse(
-            safe=is_safe,
-            sanitized_text=sanitized_text
-        )
+        return gateway_pb2.OutputResponse(safe=is_safe, sanitized_text=sanitized_text)
 
     def GetCache(self, request: gateway_pb2.CacheRequest, 
                  context: grpc.ServicerContext) -> gateway_pb2.CacheResponse:
-        """使用向量相似度执行语义缓存搜索，增加模型隔离校验。"""
+        """分布式分布式语义搜索。"""
         rid = get_request_id(context)
-        logger.info("[RID:%s] 正在搜索语义缓存 (Model: %s)", rid, request.model)
-        
         prompt = request.prompt
         target_model = request.model
-        if not prompt:
-            return gateway_pb2.CacheResponse(hit=False)
-
-        # 在锁外部生成 Embedding，避免阻塞其他请求
-        embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
         
-        # 1. 在 FAISS 索引中搜索
-        with cache_lock:
-            if FAISS_INDEX.ntotal == 0:
-                pass # 后续进入模拟逻辑
-            else:
-                # 检索 Top-5 以在不同模型间找到匹配项
-                K = min(5, FAISS_INDEX.ntotal)
-                distances, indices = FAISS_INDEX.search(embedding, K)
-                
-                for dist, idx in zip(distances[0], indices[0]):
-                    if dist < 0.2:
-                        _, cached_resp, cached_model = CACHE_STORE[idx]
-                        if cached_model == "any" or cached_model == target_model:
-                            logger.info("[RID:%s] 语义缓存命中 (距离: %.4f, 来源: %s)", 
-                                        rid, dist, cached_model)
-                            return gateway_pb2.CacheResponse(hit=True, response=cached_resp)
+        if not prompt: return gateway_pb2.CacheResponse(hit=False)
 
-        # 2. 模拟/测试逻辑
-        self._handle_mock_cache(prompt, target_model, rid)
+        # 生成向量
+        query_vector = EMBEDDING_MODEL.encode([prompt])[0].tolist()
+        
+        try:
+            # 执行多维度过滤搜索
+            search_result = qdrant_client.search(
+                collection_name=QDRANT_COLLECTION,
+                query_vector=query_vector,
+                query_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="model",
+                            match=MatchValue(value=target_model)
+                        )
+                    ]
+                ),
+                limit=1,
+                score_threshold=0.85 # 余弦相似度阈值
+            )
 
-        logger.info("[RID:%s] 语义缓存未命中", rid)
+            if search_result:
+                best_hit = search_result[0]
+                logger.info("[RID:%s] Qdrant 语义缓存命中 (得分: %.4f)", rid, best_hit.score)
+                return gateway_pb2.CacheResponse(
+                    hit=True, 
+                    response=best_hit.payload.get("response", "")
+                )
+        except Exception as e:
+            logger.error("[RID:%s] Qdrant 检索失败: %s", rid, e)
+
+        # 处理模拟规则（可选）
+        if "what is 1+1" in prompt.lower():
+            self._add_to_cache(prompt, "答案是 2。", target_model)
+
         return gateway_pb2.CacheResponse(hit=False)
 
-    def _handle_mock_cache(self, prompt: str, model: str, rid: str):
-        """处理模拟/测试用的缓存项。"""
-        if "what is 1+1" in prompt.lower():
-            logger.info("[RID:%s] 正在为 '1+1' 构建模拟缓存响应", rid)
-            self._add_to_cache(prompt, "答案是 2。", model)
-
     def _add_to_cache(self, prompt: str, response: str, model: str):
-        """将新条目添加到语义索引并异步持久化。"""
-        embedding = EMBEDDING_MODEL.encode([prompt]).astype('float32')
+        """将新条目存入 Qdrant。"""
+        vector = EMBEDDING_MODEL.encode([prompt])[0].tolist()
+        point_id = str(uuid.uuid4())
         
-        with cache_lock:
-            FAISS_INDEX.add(embedding)
-            CACHE_STORE.append((prompt, response, model))
-        
-        # 通知后台线程进行保存。
-        PERSISTENCE_QUEUE.put(True)
-
+        try:
+            qdrant_client.upsert(
+                collection_name=QDRANT_COLLECTION,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={
+                            "prompt": prompt,
+                            "response": response,
+                            "model": model
+                        }
+                    )
+                ]
+            )
+            logger.info("已同步至 Qdrant 共享缓存: %s", point_id)
+        except Exception as e:
+            logger.error("写入 Qdrant 失败: %s", e)
 
 def serve():
-    """启动 gRPC 服务器。"""
-    load_cache()
+    """启动分布式审计服务。"""
+    ensure_collection()
     
-    # 启动异步持久化背景线程。
-    worker = threading.Thread(target=persistence_worker, daemon=True)
-    worker.start()
-
-    # 从环境变量读取端口，默认为 50051
-    port = os.getenv("PYTHON_GRPC_PORT", os.getenv("GRPC_PORT", "50051"))
-    server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=10))
+    port = os.getenv("PYTHON_GRPC_PORT", "50051")
+    server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=20))
     gateway_pb2_grpc.add_AiLogicServicer_to_server(AiLogicServicer(), server)
     server.add_insecure_port(f'[::]:{port}')
-    logger.info("AI 智能审计服务 (Python) 已启动，监听端口: %s", port)
+    logger.info("AI 智能审计服务 (Python/Qdrant) 已启动，监听端口: %s", port)
     server.start()
     server.wait_for_termination()
-
 
 if __name__ == '__main__':
     serve()

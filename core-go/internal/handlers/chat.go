@@ -23,7 +23,7 @@ import (
 // ChatHandler 处理与聊天补全相关的 HTTP 请求。
 type ChatHandler struct {
 	intelligenceClient pb.AiLogicClient
-	nitroClient        pb.AiLogicClient
+	nitroClient        observability.NitroClient
 	router             *router.SmartRouter
 	config             *config.Config
 	rdb                *redis.Client // Redis 客户端，用于更新配额
@@ -31,7 +31,7 @@ type ChatHandler struct {
 }
 
 // NewChatHandler 创建一个包含所需依赖的 ChatHandler 实例。
-func NewChatHandler(ic pb.AiLogicClient, nc pb.AiLogicClient, sr *router.SmartRouter, rdb *redis.Client, cfg *config.Config) *ChatHandler {
+func NewChatHandler(ic pb.AiLogicClient, nc observability.NitroClient, sr *router.SmartRouter, rdb *redis.Client, cfg *config.Config) *ChatHandler {
 	limit := cfg.MaxConcurrentRequests
 	if limit <= 0 {
 		limit = 1000
@@ -96,7 +96,7 @@ func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 // extractPrompt 从请求体中提取最后一条用户消息。
 func (h *ChatHandler) extractPrompt(req *models.ChatCompletionRequest) string {
 	if len(req.Messages) > 0 {
-		return req.Messages[len(req.Messages)-1].Content
+		return req.Messages[len(req.Messages)-1].GetText()
 	}
 	return ""
 }
@@ -107,10 +107,10 @@ func (h *ChatHandler) asyncCountTokens(rid, text, model string) {
 		tCtx, cancel := context.WithTimeout(context.Background(), h.config.TokenCountTimeout)
 		defer cancel()
 		tCtx = observability.NewOutContext(tCtx, rid)
-		resp, err := h.nitroClient.CountTokens(tCtx, &pb.TokenRequest{Text: text, Model: model})
+		count, err := h.nitroClient.CountTokens(tCtx, model, text)
 		if err == nil {
-			observability.TokenUsage.WithLabelValues(model).Add(float64(resp.Count))
-			slog.Info("指标已记录", "request_id", rid, "tokens", resp.Count)
+			observability.TokenUsage.WithLabelValues(model).Add(float64(count))
+			slog.Info("指标已记录", "request_id", rid, "tokens", count)
 		}
 	}()
 }
@@ -150,8 +150,8 @@ func (h *ChatHandler) checkCache(c *gin.Context, ctx context.Context, rid, promp
 func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, prompt, model string) (string, bool) {
 	nitroCtx, cancelNitro := context.WithTimeout(ctx, h.config.GuardrailNitroTimeout)
 	defer cancelNitro()
-	if rsResp, err := h.nitroClient.CheckInput(nitroCtx, &pb.InputRequest{Prompt: prompt}); err == nil {
-		prompt = rsResp.SanitizedPrompt
+	if sanitized, err := h.nitroClient.CheckInput(nitroCtx, prompt); err == nil {
+		prompt = sanitized
 	} else {
 		slog.Warn("Nitro guardrail skip due to error", "request_id", rid, "error", err)
 	}
@@ -400,7 +400,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 		}
 
 		if len(resp.Choices) > 0 {
-			auditedText, _ := h.runOutputGuardrails(ctx, rid, resp.Choices[0].Message.Content, node.ModelID)
+			auditedText, _ := h.runOutputGuardrails(ctx, rid, resp.Choices[0].Message.GetText(), node.ModelID)
 			resp.Choices[0].Message.Content = auditedText
 		}
 
@@ -414,7 +414,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 		if observability.GlobalAuditLogger != nil {
 			var respText string
 			if len(resp.Choices) > 0 {
-				respText = resp.Choices[0].Message.Content
+				respText = resp.Choices[0].Message.GetText()
 			}
 			observability.GlobalAuditLogger.Log(&observability.AuditRecord{
 				Timestamp: time.Now(),

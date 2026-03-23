@@ -26,15 +26,17 @@ type ProviderType string
 const (
 	OpenAI ProviderType = "openai"
 	Mock   ProviderType = "mock"
+	Plugin ProviderType = "plugin" // [Phase 5] 动态插件类型
 )
 
 // Config 包含创建适配器所需的配置信息。
 type Config struct {
-	Type    ProviderType
-	APIKey  string
-	URL     string
-	Timeout time.Duration
-	Name    string // 仅用于 Mock
+	Type       ProviderType
+	APIKey     string
+	URL        string
+	Timeout    time.Duration
+	Name       string // 仅用于 Mock
+	PluginName string // [Phase 5] 插件名称，对应 configs/adapters/*.yaml
 }
 
 // NewProvider 是一个工厂函数，根据配置创建对应的 Provider 实例。
@@ -44,6 +46,17 @@ func NewProvider(cfg Config) (Provider, error) {
 		return NewOpenAIAdapter(cfg.APIKey, cfg.URL, cfg.Timeout), nil
 	case Mock:
 		return &MockAdapter{Name: cfg.Name}, nil
+	case Plugin:
+		// 从全局注册表加载
+		plugin, ok := GlobalRegistry.GetPlugin(cfg.PluginName)
+		if !ok {
+			return nil, fmt.Errorf("plugin configuration not found: %s", cfg.PluginName)
+		}
+		// 若 YAML 里定义了 BaseURL，则覆盖 Config 中的 URL（或优先使用 Config）
+		if cfg.URL != "" {
+			plugin.BaseURL = cfg.URL
+		}
+		return NewDynamicAdapter(plugin, cfg.APIKey, cfg.Timeout), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", cfg.Type)
 	}

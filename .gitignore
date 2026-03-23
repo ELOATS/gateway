@@ -13,12 +13,27 @@ core-go/go.sum.bak
 # Rust
 **/target/
 **/target_tmp/
+utils-rust/*.txt
 
 # Python
 **/__pycache__/
 **/.venv/
+logic-python/*
+!logic-python/Dockerfile
+!logic-python/README.md
+!logic-python/gateway_pb2.py
+!logic-python/gateway_pb2_grpc.py
+!logic-python/main.py
+!logic-python/test_cache.py
+!logic-python/uv.lock
+!logic-python/pyproject.toml
+!logic-python/requirements.txt
+!logic-python/.python-version
 logic-python/data/
 .python-version
+
+# Wasm
+**/*.wasm
 
 # Build / IDE
 .vscode/
@@ -26,3 +41,5 @@ logic-python/data/
 *.exe
 *.pdb
 *.d
+*.log
+*.test
