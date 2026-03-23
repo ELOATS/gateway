@@ -14,7 +14,9 @@ dependencies = [
     "sentence-transformers",
     "faiss-cpu",
     "numpy",
-    "torch", # 显式添加 torch
+    "torch",
+    "qdrant-client",
+    "protobuf",
 ]
 
 [[tool.uv.index]]

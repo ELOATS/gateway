@@ -32,7 +32,16 @@ func main() {
 	observability.InitLogger()
 	slog.Info("正在初始化 AI 网关核心", "port", cfg.Port)
 
-	// 初始化 OpenTelemetry 追踪。
+	// 3. 加载动态插件 (Phase 5)
+	pluginDir := "configs/adapters"
+	_ = os.MkdirAll(pluginDir, 0755)
+	if err := adapters.GlobalRegistry.LoadPlugins(pluginDir); err != nil {
+		slog.Warn("加载动态插件失败", "dir", pluginDir, "error", err)
+	} else {
+		slog.Info("动态插件解析完成", "count", len(adapters.GlobalRegistry.Plugins))
+	}
+
+	// 4. 初始化 OpenTelemetry 追踪。
 	shutdownTracer, err := observability.InitTracer(context.Background(), cfg.OTELCollectorAddr)
 	if err != nil {
 		slog.Warn("无法初始化追踪器", "error", err)
@@ -75,20 +84,34 @@ func main() {
 	intelligenceClient, pyConn := mustDial(cfg.PythonAddr, dialOpts...)
 	defer pyConn.Close()
 
-	nitroClient, rsConn := mustDial(cfg.RustAddr, dialOpts...)
-	defer rsConn.Close()
+	// 3. 初始化 Nitro 平面 (Wasm 优先，gRPC 为 Fallback)：
+	var nitroClient observability.NitroClient
+	wasmPath := "wasm/nitro.wasm"
+	
+	if _, err := os.Stat(wasmPath); err == nil {
+		slog.Info("检测到 NITRO 2.0 (Wasm) 核心，正在尝试注入...")
+		// 读取敏感词配置用于注入 Wasm
+		rules, _ := os.ReadFile("configs/sensitive.txt")
+		c, err := observability.NewWasmNitroClient(context.Background(), wasmPath, string(rules))
+		if err == nil {
+			nitroClient = c
+			slog.Info("NITRO 2.0 (Wasm) 即时加速平面就绪")
+		} else {
+			slog.Warn("Wasm 核心注入失败，落回 gRPC 模式", "error", err)
+		}
+	}
 
-	// 4. 初始化核心路由组件：
+	if nitroClient == nil {
+		rsClient, rsConn := mustDial(cfg.RustAddr, dialOpts...)
+		defer rsConn.Close()
+		nitroClient = &observability.GrpcNitroClient{Client: rsClient}
+		slog.Info("NITRO 1.0 (gRPC) 通讯平面就绪")
+	}
+
+	// 4. 初始化核心路由组件与业务 Handler：
 	nodes := initNodes(cfg)
 	sr, _ := initSmartRouter(cfg, nodes)
 
-	slog.Info("智能路由引擎就绪",
-		"default_strategy", cfg.RouteStrategy,
-		"nodes_registered", len(nodes),
-		"strategies_registered", 6,
-	)
-
-	// 5. 初始化业务组件与 HTTP 服务：
 	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, rdb, cfg)
 	adminHandler := handlers.NewAdminHandler(sr, rdb)
 	routerEngine := routes.NewRouter(chatHandler, adminHandler, rdb, cfg)

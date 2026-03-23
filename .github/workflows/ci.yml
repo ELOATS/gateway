@@ -50,6 +50,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: utils-rust -> target
+          prefix-key: "v2-rust"
 
       - name: Build
         run: |
@@ -59,7 +60,7 @@ jobs:
       - name: Test
         run: |
           cd utils-rust
-          cargo test --verbose
+          RUST_MIN_STACK=67108864 cargo test --verbose -- --test-threads=1 --nocapture
 
   python-ci:
     name: Python Logic (Intelligence)

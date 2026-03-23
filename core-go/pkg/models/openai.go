@@ -1,6 +1,10 @@
 // Package models 提供 AI 网关通用的数据结构模型。
 package models
 
+import (
+	"strings"
+)
+
 // ChatCompletionRequest 表示标准 OpenAI 聊天补全请求。
 type ChatCompletionRequest struct {
 	Model       string    `json:"model"`       // 使用的模型名称。
@@ -26,8 +30,53 @@ type FunctionCall struct {
 
 // Message 表示聊天对话中的单条消息。
 type Message struct {
-	Role    string `json:"role"`    // 角色（system, user, assistant）。
-	Content string `json:"content"` // 消息内容。
+	Role    string `json:"role"`             // 角色（system, user, assistant）。
+	Content any    `json:"content,omitempty"` // 消息内容：支持字符串或 []ContentPart
+}
+
+// GetText 返回消息的纯文本部分，用于审计、分词等。
+func (m *Message) GetText() string {
+	if m.Content == nil {
+		return ""
+	}
+	switch v := m.Content.(type) {
+	case string:
+		return v
+	case []ContentPart:
+		var sb strings.Builder
+		for _, p := range v {
+			if p.Type == "text" {
+				sb.WriteString(p.Text)
+			}
+		}
+		return sb.String()
+	case []interface{}:
+		var sb strings.Builder
+		for _, p := range v {
+			if m, ok := p.(map[string]interface{}); ok {
+				if m["type"] == "text" {
+					if text, ok := m["text"].(string); ok {
+						sb.WriteString(text)
+					}
+				}
+			}
+		}
+		return sb.String()
+	}
+	return ""
+}
+
+// ContentPart 类型表示多模态内容的一个片段。
+type ContentPart struct {
+	Type     string            `json:"type"`                // "text" 或 "image_url"
+	Text     string            `json:"text,omitempty"`      // 当 type 为 text 时使用
+	ImageURL *ContentPathImage `json:"image_url,omitempty"` // 当 type 为 image_url 时使用
+}
+
+// ContentPathImage 描述图片片段的 URL 详情。
+type ContentPathImage struct {
+	URL    string `json:"url"`              // 图片的 URL 或 base64
+	Detail string `json:"detail,omitempty"` // 采样细节 (low, high, auto)
 }
 
 // ChatCompletionResponse 表示标准 OpenAI 聊天补全响应。
