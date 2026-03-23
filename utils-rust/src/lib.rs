@@ -141,28 +141,25 @@ pub mod service_impl {
 mod tests {
     use super::*;
 
-    use std::io::Write;
+    /// Test BPE initialization by forcing execution on a thread with a very large
+    /// explicit stack (64 MiB). tiktoken-rs's internal regex/NFA compilation is
+    /// deeply recursive and reliably causes SIGSEGV on CI runners when the stack
+    /// is smaller, even with RUST_MIN_STACK=16 MiB set in the environment.
     #[test]
     fn test_bpe_initialization() {
-        println!("DEBUG: Starting test_bpe_initialization");
-        let _ = std::io::stdout().flush();
+        // 64 MiB – enough head-room for tiktoken-rs's NFA construction.
+        const STACK_SIZE: usize = 64 * 1024 * 1024;
 
-        println!("DEBUG: Checking RUST_MIN_STACK...");
-        if let Ok(val) = std::env::var("RUST_MIN_STACK") {
-            println!("DEBUG: RUST_MIN_STACK={}", val);
-        } else {
-            println!("DEBUG: RUST_MIN_STACK not set");
-        }
-        let _ = std::io::stdout().flush();
+        let handler = std::thread::Builder::new()
+            .name("bpe-init-test".to_string())
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let len = BPE_CL100K.encode_with_special_tokens("test").len();
+                println!("BPE_CL100K initialised, token count for \"test\": {len}");
+                assert!(len > 0, "BPE_CL100K returned 0 tokens for non-empty input");
+            })
+            .expect("failed to spawn large-stack thread");
 
-        println!("DEBUG: Initializing BPE_CL100K...");
-        let _ = std::io::stdout().flush();
-        
-        // Attempt initialization
-        let len = BPE_CL100K.encode_with_special_tokens("test").len();
-        println!("DEBUG: BPE_CL100K initialized successfully, len={}", len);
-        let _ = std::io::stdout().flush();
-        
-        assert!(len > 0);
+        handler.join().expect("BPE initialisation thread panicked");
     }
 }
