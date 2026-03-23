@@ -3,6 +3,10 @@ name = "utils-rust"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata]
+# Bump this value to force Rust CI cache invalidation when needed.
+cache-version = "2"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -36,7 +40,6 @@ tonic-build = { version = "0.12", optional = true }
 panic = "abort"
 
 [profile.dev]
-panic = "abort"
 opt-level = 0
 
 [profile.dev.package.fancy-regex]
