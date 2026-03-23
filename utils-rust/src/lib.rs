@@ -134,3 +134,17 @@ pub extern "C" fn free_string(ptr: *mut c_char) {
 pub mod service_impl {
     pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bpe_initialization() {
+        // 尝试初始化 BPE 编译器，观察是否在 CI 环境下触发 SIGSEGV
+        println!("Initializing BPE_CL100K...");
+        let len = BPE_CL100K.encode_with_special_tokens("test").len();
+        assert!(len > 0);
+        println!("BPE_CL100K initialized successfully.");
+    }
+}
