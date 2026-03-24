@@ -12,9 +12,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME_GO: ${{ github.repository }}-go
-  IMAGE_NAME_PYTHON: ${{ github.repository }}-python
-  IMAGE_NAME_RUST: ${{ github.repository }}-rust
+  IMAGE_NAME_GO: eloats/gateway-go
+  IMAGE_NAME_PYTHON: eloats/gateway-python
+  IMAGE_NAME_RUST: eloats/gateway-rust
 
 jobs:
   build-and-push:
