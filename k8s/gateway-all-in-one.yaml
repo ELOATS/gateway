@@ -1,0 +1,183 @@
+# 该文件为 GitOps 部署的总入口。包含了由 Docker Compose 转换过来的 K8s 资源。
+# GitHub Actions 会在构建新镜像后，自动用 sed 脚本更新这里的 image 标签为最新的 Git Hash。
+
+---
+# =============== 1. Redis (Rate Limit & Context) ===============
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+
+---
+# =============== 2. Qdrant (Semantic Cache) ===============
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:latest
+          ports:
+            - containerPort: 6333
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+spec:
+  selector:
+    app: qdrant
+  ports:
+    - port: 6333
+
+---
+# =============== 3. Python Intelligence Layer ===============
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intelligence
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: intelligence
+  template:
+    metadata:
+      labels:
+        app: intelligence
+    spec:
+      containers:
+        - name: python-logic
+          # ❗️注意：这里的 Tag (:latest) 会被 GitHub Actions 自动替换
+          image: ghcr.io/${{ github.repository }}-python:latest 
+          ports:
+            - containerPort: 50051
+          env:
+            - name: PYTHON_GRPC_PORT
+              value: "50051"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: intelligence
+spec:
+  selector:
+    app: intelligence
+  ports:
+    - port: 50051
+
+---
+# =============== 4. Rust Nitro Layer ===============
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nitro
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nitro
+  template:
+    metadata:
+      labels:
+        app: nitro
+    spec:
+      containers:
+        - name: rust-nitro
+          # ❗️注意：这里的 Tag (:latest) 会被 GitHub Actions 自动替换
+          image: ghcr.io/${{ github.repository }}-rust:latest
+          ports:
+            - containerPort: 50052
+          env:
+            - name: RUST_GRPC_PORT
+              value: "50052"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nitro
+spec:
+  selector:
+    app: nitro
+  ports:
+    - port: 50052
+
+---
+# =============== 5. Go Orchestration (Gateway) ===============
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestration
+  template:
+    metadata:
+      labels:
+        app: orchestration
+    spec:
+      containers:
+        - name: go-gateway
+          # ❗️注意：这里的 Tag (:latest) 会被 GitHub Actions 自动替换
+          image: ghcr.io/${{ github.repository }}-go:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: PYTHON_ADDR
+              value: "intelligence:50051" # 与 Service 名称匹配
+            - name: RUST_ADDR
+              value: "nitro:50052"       # 与 Service 名称匹配
+            # TODO: 生产环境应使用 Kubernetes Secret 挂载
+            - name: GATEWAY_API_KEY
+              value: "sk-gw-default-123456"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestration
+spec:
+  type: LoadBalancer # 如果要在 Minikube 外访问，使用 NodePort 或 LoadBalancer
+  selector:
+    app: orchestration
+  ports:
+    - port: 8080
+      targetPort: 8080
