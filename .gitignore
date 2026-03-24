@@ -43,3 +43,4 @@ logic-python/data/
 *.d
 *.log
 *.test
+.gocache/

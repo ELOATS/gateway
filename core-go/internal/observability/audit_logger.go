@@ -56,6 +56,7 @@ func (l *AuditLogger) Log(record *AuditRecord) {
 	case l.sinkCh <- record:
 	default:
 		slog.Error("合规审计缓冲队列已满，丢弃日志！", "request_id", record.RequestID)
+		AuditDroppedTotal.Inc()
 	}
 }
 
