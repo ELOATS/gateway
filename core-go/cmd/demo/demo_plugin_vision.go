@@ -23,11 +23,11 @@ func main() {
 
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		
+
 		fmt.Println("Body 内容解析:")
 		fmt.Printf(" - Model: %v\n", body["model"])
 		fmt.Printf(" - MaxTokens (from extra): %v\n", body["max_tokens"])
-		
+
 		msgs := body["messages"].([]any)
 		last := msgs[len(msgs)-1].(map[string]any)
 		content := last["content"].([]any)

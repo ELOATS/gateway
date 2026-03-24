@@ -7,8 +7,8 @@ import (
 
 // ChatCompletionRequest 表示标准 OpenAI 聊天补全请求。
 type ChatCompletionRequest struct {
-	Model       string    `json:"model"`       // 使用的模型名称。
-	Messages    []Message `json:"messages"`    // 聊天消息列表。
+	Model       string    `json:"model"`                 // 使用的模型名称。
+	Messages    []Message `json:"messages"`              // 聊天消息列表。
 	Temperature float64   `json:"temperature,omitempty"` // 采样温度。
 	Stream      bool      `json:"stream,omitempty"`      // 是否开启流式响应。
 	Tools       []Tool    `json:"tools,omitempty"`       // Agent 工具列表
@@ -30,7 +30,7 @@ type FunctionCall struct {
 
 // Message 表示聊天对话中的单条消息。
 type Message struct {
-	Role    string `json:"role"`             // 角色（system, user, assistant）。
+	Role    string `json:"role"`              // 角色（system, user, assistant）。
 	Content any    `json:"content,omitempty"` // 消息内容：支持字符串或 []ContentPart
 }
 
@@ -102,6 +102,7 @@ type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
+
 // ChatCompletionStreamResponse 表示流式响应中的单个分块。
 type ChatCompletionStreamResponse struct {
 	ID      string         `json:"id"`

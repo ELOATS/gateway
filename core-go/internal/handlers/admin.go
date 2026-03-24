@@ -25,7 +25,7 @@ func NewAdminHandler(sr *router.SmartRouter, rdb *redis.Client) *AdminHandler {
 func (h *AdminHandler) ListNodes(c *gin.Context) {
 	nodes := h.router.GetNodes()
 	type NodeStatus struct {
-		Name   string              `json:"name"`
+		Name   string            `json:"name"`
 		Status router.NodeHealth `json:"status"`
 	}
 

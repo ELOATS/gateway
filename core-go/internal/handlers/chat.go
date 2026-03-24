@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
+	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/config"
 	"github.com/ai-gateway/core/internal/middleware"
 	"github.com/ai-gateway/core/internal/nitro"
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
-	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -162,7 +162,7 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 	pyResp, err := h.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
 	if err != nil {
 		slog.Error("智能审计服务异常", "request_id", rid, "error", err)
-		return prompt, true 
+		return prompt, true
 	}
 
 	if !pyResp.Safe {
@@ -188,7 +188,7 @@ func (h *ChatHandler) runOutputGuardrails(ctx context.Context, rid, text, model 
 
 	if !pyResp.Safe {
 		slog.Warn("输出安全拦截", "request_id", rid)
-		return pyResp.SanitizedText, true 
+		return pyResp.SanitizedText, true
 	}
 
 	return pyResp.SanitizedText, true
@@ -254,7 +254,7 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 			if !ok {
 				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 				flusher.Flush()
-				
+
 				// 计算并记录流式吞吐量 TPS (Chunk/s 作为简化估算)
 				if firstTokenReceived {
 					duration := time.Since(firstTokenTime).Seconds()
@@ -263,7 +263,7 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 						observability.TPS.WithLabelValues(req.Model, node.Name).Observe(tps)
 					}
 				}
-				
+
 				// 异步落盘流式完整内容
 				if observability.GlobalAuditLogger != nil {
 					observability.GlobalAuditLogger.Log(&observability.AuditRecord{
@@ -277,7 +277,7 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 						Tokens:    chunkCount,
 					})
 				}
-				
+
 				return
 			}
 
@@ -294,7 +294,7 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 				chunkCount++
 				content := streamResp.Choices[0].Delta.Content
 				fullResponseBuilder.WriteString(content)
-				
+
 				slidingWindow += content
 				runes := []rune(slidingWindow)
 				if len(runes) > maxWindowSize {
@@ -341,7 +341,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
 			slog.Info("等待重试", "request_id", rid, "backoff_ms", backoff.Milliseconds())
-			
+
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -412,7 +412,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 		observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
 
 		slog.Info("请求完成", "request_id", rid, "duration_ms", duration.Milliseconds())
-		
+
 		// 异步合规审计落盘
 		if observability.GlobalAuditLogger != nil {
 			var respText string
@@ -430,7 +430,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 				Tokens:    resp.Usage.TotalTokens,
 			})
 		}
-		
+
 		c.JSON(http.StatusOK, resp)
 		return
 	}

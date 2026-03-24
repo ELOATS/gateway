@@ -50,7 +50,7 @@ func TestOpenAIAdapter_ChatCompletionStream(t *testing.T) {
 
 	adapter := NewOpenAIAdapter("test-key", server.URL, 5*time.Second)
 	req := &models.ChatCompletionRequest{Model: "gpt-4"}
-	
+
 	respCh, errCh := adapter.ChatCompletionStream(req)
 
 	var result string
@@ -79,7 +79,7 @@ DONE:
 func BenchmarkOpenAI_StreamParsing(b *testing.B) {
 	// 模拟一条标准的 SSE 数据行。
 	line := "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1694268190,\"model\":\"gpt-4-0613\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello world\"},\"finish_reason\":null}]}\n"
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for i := 0; i < 10; i++ {

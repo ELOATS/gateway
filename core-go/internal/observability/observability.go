@@ -17,7 +17,6 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-
 // InitTracer 初始化 OpenTelemetry 追踪器。
 func InitTracer(ctx context.Context, collectorAddr string) (func(), error) {
 	if collectorAddr == "" {
@@ -103,7 +102,7 @@ var (
 		Help:    "每个节点的调用延迟",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"node"})
-	
+
 	// CacheHitsTotal 统计语义缓存的命中与未命中次数。
 	CacheHitsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_cache_hits_total",

@@ -23,11 +23,11 @@ type AuditRecord struct {
 
 // AuditLogger 提供高性能、无阻塞的异步日志下沉。
 type AuditLogger struct {
-	sinkCh   chan *AuditRecord
-	wg       sync.WaitGroup
-	quit     chan struct{}
-	logFile  *os.File
-	jsonEnc  *json.Encoder
+	sinkCh  chan *AuditRecord
+	wg      sync.WaitGroup
+	quit    chan struct{}
+	logFile *os.File
+	jsonEnc *json.Encoder
 }
 
 // NewAuditLogger 初始化合规审计记录器，将数据写入指定的落盘文件。
@@ -85,7 +85,7 @@ func (l *AuditLogger) worker() {
 // Close 优雅关闭合规收集器，保证落盘。
 func (l *AuditLogger) Close(ctx context.Context) error {
 	close(l.quit)
-	
+
 	c := make(chan struct{})
 	go func() {
 		l.wg.Wait()

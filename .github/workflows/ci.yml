@@ -71,7 +71,13 @@ jobs:
         run: go mod download
 
       - name: Check formatting
-        run: test -z "$(gofmt -l .)"
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following Go files are not formatted:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
 
       - name: Static analysis
         run: go vet ./... 2>&1 | tee go-vet.log
@@ -121,10 +127,18 @@ jobs:
           prefix-key: v3-rust
 
       - name: Check formatting
-        run: cargo fmt --all -- --check 2>&1 | tee rust-fmt.log
+        run: |
+          if ! cargo fmt --all -- --check 2>&1 | tee rust-fmt.log; then
+            echo "Rust formatting check failed. Run 'cargo fmt --all' in utils-rust."
+            exit 1
+          fi
 
       - name: Static analysis
-        run: cargo clippy --all-targets --all-features -- -D warnings 2>&1 | tee rust-clippy.log
+        run: |
+          if ! cargo clippy --all-targets --all-features -- -D warnings 2>&1 | tee rust-clippy.log; then
+            echo "Rust clippy check failed. Review rust-clippy.log for details."
+            exit 1
+          fi
 
       - name: Build
         run: cargo build --verbose 2>&1 | tee rust-build.log
@@ -173,7 +187,11 @@ jobs:
         run: uv tool install ruff 2>&1 | tee python-ruff-install.log
 
       - name: Lint
-        run: uv tool run ruff check . 2>&1 | tee python-lint.log
+        run: |
+          if ! uv tool run ruff check . 2>&1 | tee python-lint.log; then
+            echo "Python lint check failed. Run 'uv tool run ruff check .' in logic-python."
+            exit 1
+          fi
 
       - name: Bytecode compile check
         run: uv run python -m compileall . 2>&1 | tee python-compile.log

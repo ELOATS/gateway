@@ -85,8 +85,8 @@ func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
 func checkRedisLimit(ctx context.Context, rdb *redis.Client, label string, qps float64, burst int) (bool, error) {
 	key := "rl:" + label
 	now := time.Now().UnixNano() / 1e6 // 毫秒
-	window := int64(1000)             // 1秒滑动窗口
-	limit := int64(qps)               // 粗略 QPS 限制
+	window := int64(1000)              // 1秒滑动窗口
+	limit := int64(qps)                // 粗略 QPS 限制
 
 	// Lua 脚本实现：1. 清理过期数据 2. 统计计数 3. 判断并写入
 	script := `
