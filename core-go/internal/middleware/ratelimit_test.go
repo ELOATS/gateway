@@ -53,7 +53,7 @@ func TestRateLimiter(t *testing.T) {
 	t.Run("Multi-tenant isolation", func(t *testing.T) {
 		r := gin.New()
 		r.Use(RequestID())
-		
+
 		// Helper middleware to set label
 		r.Use(func(c *gin.Context) {
 			if label := c.GetHeader("X-Test-Label"); label != "" {
@@ -62,11 +62,11 @@ func TestRateLimiter(t *testing.T) {
 			c.Next()
 		})
 		r.Use(RateLimiter(nil, qps, burst))
-		
+
 		r.GET("/test", func(c *gin.Context) {
 			c.Status(http.StatusOK)
 		})
-		
+
 		// 1. Request for User A
 		reqA, _ := http.NewRequest(http.MethodGet, "/test", nil)
 		reqA.Header.Set("X-Test-Label", "user_a")

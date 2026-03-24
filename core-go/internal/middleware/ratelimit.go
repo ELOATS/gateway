@@ -14,12 +14,32 @@ import (
 	"golang.org/x/time/rate"
 )
 
+type localLimiter struct {
+	l        *rate.Limiter
+	lastSeen time.Time
+}
+
 // RateLimiter 返回一个 Gin 中间件，支持基于 Redis 的分布式滑动窗口限流。
 // 如果 Redis 不可用，将自动降级为本地内存令牌桶限流。
 func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
 	// 本地降级限流器池（用于 Redis 故障或未配置时）。
-	localLimiters := make(map[string]*rate.Limiter)
-	var mu sync.RWMutex
+	localLimiters := make(map[string]*localLimiter)
+	var mu sync.Mutex
+
+	// 后台清理过期限流器
+	go func() {
+		for {
+			time.Sleep(10 * time.Minute)
+			mu.Lock()
+			now := time.Now()
+			for k, v := range localLimiters {
+				if now.Sub(v.lastSeen) > time.Hour {
+					delete(localLimiters, k)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
 
 	return func(c *gin.Context) {
 		label := c.GetString("key_label")
@@ -43,18 +63,17 @@ func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
 		}
 
 		// 本地限流逻辑。
-		mu.RLock()
-		l, ok := localLimiters[label]
-		mu.RUnlock()
-
+		mu.Lock()
+		le, ok := localLimiters[label]
 		if !ok {
-			mu.Lock()
-			l = rate.NewLimiter(rate.Limit(qps), burst)
-			localLimiters[label] = l
-			mu.Unlock()
+			le = &localLimiter{l: rate.NewLimiter(rate.Limit(qps), burst)}
+			localLimiters[label] = le
 		}
+		le.lastSeen = time.Now()
+		allow := le.l.Allow()
+		mu.Unlock()
 
-		if !l.Allow() {
+		if !allow {
 			reject(c, qps, label)
 			return
 		}
@@ -66,8 +85,8 @@ func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
 func checkRedisLimit(ctx context.Context, rdb *redis.Client, label string, qps float64, burst int) (bool, error) {
 	key := "rl:" + label
 	now := time.Now().UnixNano() / 1e6 // 毫秒
-	window := int64(1000)             // 1秒滑动窗口
-	limit := int64(qps)               // 粗略 QPS 限制
+	window := int64(1000)              // 1秒滑动窗口
+	limit := int64(qps)                // 粗略 QPS 限制
 
 	// Lua 脚本实现：1. 清理过期数据 2. 统计计数 3. 判断并写入
 	script := `

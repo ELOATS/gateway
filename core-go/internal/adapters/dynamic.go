@@ -20,7 +20,7 @@ type PluginConfig struct {
 	// RequestMapping 定义了如何转换 OpenAI 请求。目前支持自定义 Header 和额外参数注入。
 	RequestMapping struct {
 		HeaderTemplate map[string]string `yaml:"header_template"`
-		BodyExtra     map[string]any    `yaml:"body_extra"`
+		BodyExtra      map[string]any    `yaml:"body_extra"`
 	} `yaml:"request_mapping"`
 }
 
@@ -45,18 +45,18 @@ func (a *DynamicAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mod
 	reqData, _ := json.Marshal(req)
 	var bodyMap map[string]any
 	json.Unmarshal(reqData, &bodyMap)
-	
+
 	for k, v := range a.Plugin.RequestMapping.BodyExtra {
 		bodyMap[k] = v
 	}
-	
+
 	finalData, _ := json.Marshal(bodyMap)
-	
+
 	httpReq, err := http.NewRequest("POST", a.Plugin.BaseURL, bytes.NewBuffer(finalData))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// 2. 注入动态 Header。支持模板渲染，如 Authorization: Bearer {{.Key}}
 	for k, tplStr := range a.Plugin.RequestMapping.HeaderTemplate {
 		tmpl, err := template.New(k).Parse(tplStr)
@@ -66,25 +66,25 @@ func (a *DynamicAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mod
 			httpReq.Header.Set(k, b.String())
 		}
 	}
-	
+
 	// 补全默认 Header
 	for k, v := range a.Plugin.DefaultHeaders {
 		if httpReq.Header.Get(k) == "" {
 			httpReq.Header.Set(k, v)
 		}
 	}
-	
+
 	resp, err := a.Client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("plugin %s error (%d): %s", a.Plugin.Name, resp.StatusCode, body)
 	}
-	
+
 	// 3. 解析响应：目前暂定优先解析为通用 OpenAI 结构。
 	// 下一步可增加 ResponseMapping 逻辑。
 	var result models.ChatCompletionResponse

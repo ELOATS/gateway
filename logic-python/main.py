@@ -1,154 +1,173 @@
+from __future__ import annotations
+
 import concurrent.futures
-import json
 import logging
 import os
 import uuid
-from typing import List, Tuple, Optional
+from typing import Any, Optional
 
 import grpc
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
-from qdrant_client.models import PointStruct, VectorParams, Distance, Filter, FieldCondition, MatchValue
 from dotenv import load_dotenv
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
 
 import gateway_pb2
 import gateway_pb2_grpc
+from prompt_injection import PromptInjectionDetector
 
-# 加载环境变量
 load_dotenv(dotenv_path=".env")
 load_dotenv(dotenv_path="../.env")
 
-# 日志配置
 logging.basicConfig(
     level=logging.INFO,
-    format='{"time":"%(asctime)s", "level":"%(levelname)s", "message":"%(message)s"}'
+    format='{"time":"%(asctime)s", "level":"%(levelname)s", "message":"%(message)s"}',
 )
 logger = logging.getLogger(__name__)
 
-# --- Qdrant 配置 ---
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "ai_gateway_cache")
-
-# 初始化 Embedding 模型
-logger.info("正在加载 Embedding 模型 (all-MiniLM-L6-v2)...")
-EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
 VECTOR_DIMENSION = 384
 
-# 初始化 Qdrant 客户端 (云原生，无状态)
-qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+_embedding_model: Optional[Any] = None
+_qdrant_client: Optional[QdrantClient] = None
+_prompt_detector: Optional[PromptInjectionDetector] = None
 
-def ensure_collection():
-    """确保 Qdrant 集合存在。"""
+
+def get_embedding_model() -> Any:
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+
+        logger.info("loading embedding model: %s", EMBEDDING_MODEL_NAME)
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    return _embedding_model
+
+
+def encode_texts(texts: list[str]) -> list[list[float]]:
+    vectors = get_embedding_model().encode(texts)
+    return [list(vector) for vector in vectors]
+
+
+def get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    if _qdrant_client is None:
+        _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    return _qdrant_client
+
+
+def get_prompt_detector() -> PromptInjectionDetector:
+    global _prompt_detector
+    if _prompt_detector is None:
+        _prompt_detector = PromptInjectionDetector(embed_fn=encode_texts)
+    return _prompt_detector
+
+
+def ensure_collection() -> None:
     try:
-        collections = qdrant_client.get_collections().collections
-        exists = any(c.name == QDRANT_COLLECTION for c in collections)
+        client = get_qdrant_client()
+        collections = client.get_collections().collections
+        exists = any(collection.name == QDRANT_COLLECTION for collection in collections)
         if not exists:
-            logger.info("创建 Qdrant 集合: %s", QDRANT_COLLECTION)
-            qdrant_client.create_collection(
+            logger.info("creating qdrant collection: %s", QDRANT_COLLECTION)
+            client.create_collection(
                 collection_name=QDRANT_COLLECTION,
                 vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
             )
-    except Exception as e:
-        logger.error("连接 Qdrant 失败 (请确保 Qdrant 服务已启动): %s", e)
+    except Exception as exc:
+        logger.error("failed to connect to qdrant: %s", exc)
+
 
 def get_request_id(context: grpc.ServicerContext) -> str:
+    if context is None:
+        return "unknown"
     metadata = dict(context.invocation_metadata())
-	# 兼容不同的 Header 键名
-    return metadata.get('x-request-id') or metadata.get('request-id') or 'unknown'
+    return metadata.get("x-request-id") or metadata.get("request-id") or "unknown"
+
 
 class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
-    """分布式智能审计服务。"""
-
-    def CheckInput(self, request: gateway_pb2.InputRequest, 
-                   context: grpc.ServicerContext) -> gateway_pb2.InputResponse:
+    def CheckInput(
+        self, request: gateway_pb2.InputRequest, context: grpc.ServicerContext
+    ) -> gateway_pb2.InputResponse:
         rid = get_request_id(context)
-        logger.info("[RID:%s] 正在执行分布式输入审计", rid)
-        
+        logger.info("[RID:%s] running input guardrails", rid)
+
         prompt = request.prompt
         sanitized = prompt
-        
-        # 模拟敏感词逻辑
         if "admin@company.com" in prompt:
             sanitized = sanitized.replace("admin@company.com", "[EMAIL_HIDDEN]")
 
-        is_safe = True
-        block_reason = ""
-        if "ignore all previous instructions" in prompt.lower():
-            is_safe = False
-            block_reason = "安全拦截: 检测到潜在的 Prompt Injection 攻击。"
+        detection = get_prompt_detector().inspect(prompt)
+        if not detection.safe:
+            logger.warning("[RID:%s] prompt injection blocked: %s", rid, detection.reason)
 
         return gateway_pb2.InputResponse(
-            safe=is_safe,
-            sanitized_prompt=sanitized,
-            reason=block_reason
+            safe=detection.safe,
+            sanitized_prompt=sanitized if detection.safe else "",
+            reason=detection.reason,
         )
 
-    def CheckOutput(self, request: gateway_pb2.OutputRequest, 
-                    context: grpc.ServicerContext) -> gateway_pb2.OutputResponse:
+    def CheckOutput(
+        self, request: gateway_pb2.OutputRequest, context: grpc.ServicerContext
+    ) -> gateway_pb2.OutputResponse:
         rid = get_request_id(context)
-        logger.info("[RID:%s] 正在执行分布式输出审计", rid)
-        
+        logger.info("[RID:%s] running output guardrails", rid)
+
         text = request.response_text
         is_safe = "contradictory" not in text.lower()
-        sanitized_text = text if is_safe else "[内容拦截: 检测到逻辑矛盾]"
-
+        sanitized_text = text if is_safe else "[content blocked: contradictory output detected]"
         return gateway_pb2.OutputResponse(safe=is_safe, sanitized_text=sanitized_text)
 
-    def GetCache(self, request: gateway_pb2.CacheRequest, 
-                 context: grpc.ServicerContext) -> gateway_pb2.CacheResponse:
-        """分布式分布式语义搜索。"""
+    def GetCache(
+        self, request: gateway_pb2.CacheRequest, context: grpc.ServicerContext
+    ) -> gateway_pb2.CacheResponse:
         rid = get_request_id(context)
         prompt = request.prompt
         target_model = request.model
-        
-        if not prompt: return gateway_pb2.CacheResponse(hit=False)
 
-        # 生成向量
-        query_vector = EMBEDDING_MODEL.encode([prompt])[0].tolist()
-        
+        if not prompt:
+            return gateway_pb2.CacheResponse(hit=False)
+
+        query_vector = encode_texts([prompt])[0]
+
         try:
-            # 执行多维度过滤搜索
-            search_result = qdrant_client.search(
+            search_result = get_qdrant_client().search(
                 collection_name=QDRANT_COLLECTION,
                 query_vector=query_vector,
                 query_filter=Filter(
                     must=[
                         FieldCondition(
                             key="model",
-                            match=MatchValue(value=target_model)
+                            match=MatchValue(value=target_model),
                         )
                     ]
                 ),
                 limit=1,
-                score_threshold=0.85 # 余弦相似度阈值
+                score_threshold=0.85,
             )
 
             if search_result:
                 best_hit = search_result[0]
-                logger.info("[RID:%s] Qdrant 语义缓存命中 (得分: %.4f)", rid, best_hit.score)
+                logger.info("[RID:%s] qdrant cache hit (score=%.4f)", rid, best_hit.score)
                 return gateway_pb2.CacheResponse(
-                    hit=True, 
-                    response=best_hit.payload.get("response", "")
+                    hit=True,
+                    response=best_hit.payload.get("response", ""),
                 )
-        except Exception as e:
-            logger.error("[RID:%s] Qdrant 检索失败: %s", rid, e)
+        except Exception as exc:
+            logger.error("[RID:%s] qdrant search failed: %s", rid, exc)
 
-        # 处理模拟规则（可选）
         if "what is 1+1" in prompt.lower():
             self._add_to_cache(prompt, "答案是 2。", target_model)
 
         return gateway_pb2.CacheResponse(hit=False)
 
-    def _add_to_cache(self, prompt: str, response: str, model: str):
-        """将新条目存入 Qdrant。"""
-        vector = EMBEDDING_MODEL.encode([prompt])[0].tolist()
+    def _add_to_cache(self, prompt: str, response: str, model: str) -> None:
+        vector = encode_texts([prompt])[0]
         point_id = str(uuid.uuid4())
-        
+
         try:
-            qdrant_client.upsert(
+            get_qdrant_client().upsert(
                 collection_name=QDRANT_COLLECTION,
                 points=[
                     PointStruct(
@@ -157,26 +176,62 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
                         payload={
                             "prompt": prompt,
                             "response": response,
-                            "model": model
-                        }
+                            "model": model,
+                        },
                     )
-                ]
+                ],
             )
-            logger.info("已同步至 Qdrant 共享缓存: %s", point_id)
-        except Exception as e:
-            logger.error("写入 Qdrant 失败: %s", e)
+            logger.info("cache entry stored in qdrant: %s", point_id)
+        except Exception as exc:
+            logger.error("failed to upsert qdrant cache entry: %s", exc)
 
-def serve():
-    """启动分布式审计服务。"""
+
+def build_server_credentials():
+    if os.getenv("PYTHON_GRPC_TLS_ENABLED", "false").lower() != "true":
+        return None
+
+    cert_file = os.getenv("PYTHON_GRPC_CERT_FILE", "")
+    key_file = os.getenv("PYTHON_GRPC_KEY_FILE", "")
+    if not cert_file or not key_file:
+        raise ValueError("PYTHON_GRPC_TLS_ENABLED requires PYTHON_GRPC_CERT_FILE and PYTHON_GRPC_KEY_FILE")
+
+    with open(cert_file, "rb") as cert_handle:
+        cert_chain = cert_handle.read()
+    with open(key_file, "rb") as key_handle:
+        private_key = key_handle.read()
+
+    client_ca_file = os.getenv("PYTHON_GRPC_CLIENT_CA_FILE", "")
+    require_client_cert = os.getenv("PYTHON_GRPC_REQUIRE_CLIENT_CERT", "false").lower() == "true"
+    root_certificates = None
+    if client_ca_file:
+        with open(client_ca_file, "rb") as ca_handle:
+            root_certificates = ca_handle.read()
+
+    return grpc.ssl_server_credentials(
+        [(private_key, cert_chain)],
+        root_certificates=root_certificates,
+        require_client_auth=require_client_cert,
+    )
+
+
+def serve() -> None:
     ensure_collection()
-    
+
     port = os.getenv("PYTHON_GRPC_PORT", "50051")
     server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=20))
     gateway_pb2_grpc.add_AiLogicServicer_to_server(AiLogicServicer(), server)
-    server.add_insecure_port(f'[::]:{port}')
-    logger.info("AI 智能审计服务 (Python/Qdrant) 已启动，监听端口: %s", port)
+
+    credentials = build_server_credentials()
+    if credentials is None:
+        server.add_insecure_port(f"[::]:{port}")
+        logger.info("python ai logic gRPC server listening insecurely on %s", port)
+    else:
+        server.add_secure_port(f"[::]:{port}", credentials)
+        logger.info("python ai logic gRPC server listening with TLS on %s", port)
+
     server.start()
     server.wait_for_termination()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     serve()

@@ -8,10 +8,10 @@ import (
 // Rule 定义一条路由匹配规则。
 // 当 Condition 对路由上下文返回 true 时，请求将被路由到 Target 节点。
 type Rule struct {
-	Name      string                          // 规则名称（用于日志和调试）。
-	Condition func(ctx *RouteContext) bool     // 匹配条件函数。
-	Target    string                          // 目标节点名称。
-	Priority  int                             // 优先级（数字越小越优先）。
+	Name      string                       // 规则名称（用于日志和调试）。
+	Condition func(ctx *RouteContext) bool // 匹配条件函数。
+	Target    string                       // 目标节点名称。
+	Priority  int                          // 优先级（数字越小越优先）。
 }
 
 // RuleStrategy 按优先级逐条匹配规则，第一条命中的规则决定路由目标。

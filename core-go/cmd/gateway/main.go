@@ -15,13 +15,13 @@ import (
 	"github.com/ai-gateway/core/internal/adapters"
 	"github.com/ai-gateway/core/internal/config"
 	"github.com/ai-gateway/core/internal/handlers"
+	"github.com/ai-gateway/core/internal/nitro"
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
 	"github.com/ai-gateway/core/internal/routes"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -70,8 +70,13 @@ func main() {
 	defer rdb.Close()
 
 	// gRPC 连接选项：配置不安全凭据与自适应补偿重试。
+	transportCredentials, err := buildGRPCTransportCredentials(cfg)
+	if err != nil {
+		log.Fatalf("致命错误: 无法初始化 gRPC 传输凭据: %v", err)
+	}
+
 	dialOpts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: backoff.Config{
 				BaseDelay: cfg.GRPCBaseDelay,
@@ -85,14 +90,14 @@ func main() {
 	defer pyConn.Close()
 
 	// 3. 初始化 Nitro 平面 (Wasm 优先，gRPC 为 Fallback)：
-	var nitroClient observability.NitroClient
+	var nitroClient nitro.NitroClient
 	wasmPath := "wasm/nitro.wasm"
-	
+
 	if _, err := os.Stat(wasmPath); err == nil {
 		slog.Info("检测到 NITRO 2.0 (Wasm) 核心，正在尝试注入...")
 		// 读取敏感词配置用于注入 Wasm
 		rules, _ := os.ReadFile("configs/sensitive.txt")
-		c, err := observability.NewWasmNitroClient(context.Background(), wasmPath, string(rules))
+		c, err := nitro.NewWasmNitroClient(context.Background(), wasmPath, string(rules))
 		if err == nil {
 			nitroClient = c
 			slog.Info("NITRO 2.0 (Wasm) 即时加速平面就绪")
@@ -104,7 +109,7 @@ func main() {
 	if nitroClient == nil {
 		rsClient, rsConn := mustDial(cfg.RustAddr, dialOpts...)
 		defer rsConn.Close()
-		nitroClient = &observability.GrpcNitroClient{Client: rsClient}
+		nitroClient = &nitro.GrpcNitroClient{Client: rsClient}
 		slog.Info("NITRO 1.0 (gRPC) 通讯平面就绪")
 	}
 

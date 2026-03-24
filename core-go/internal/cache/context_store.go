@@ -37,7 +37,7 @@ func (s *ContextStore) Append(ctx context.Context, sessionID string, msgs []mode
 	if len(msgs) == 0 {
 		return nil
 	}
-	
+
 	key := pushContextKey(sessionID)
 	// 序列化后追加
 	var values []interface{}
@@ -48,7 +48,7 @@ func (s *ContextStore) Append(ctx context.Context, sessionID string, msgs []mode
 		}
 		values = append(values, string(data))
 	}
-	
+
 	pipe := s.rdb.Pipeline()
 	pipe.RPush(ctx, key, values...)
 	pipe.Expire(ctx, key, s.expiration)
@@ -59,14 +59,14 @@ func (s *ContextStore) Append(ctx context.Context, sessionID string, msgs []mode
 // Retrieve 拉取指定 Session 的所有历史对话记录。
 func (s *ContextStore) Retrieve(ctx context.Context, sessionID string) ([]models.Message, error) {
 	key := pushContextKey(sessionID)
-	
+
 	rawList, err := s.rdb.LRange(ctx, key, 0, -1).Result()
 	if err == redis.Nil {
 		return []models.Message{}, nil
 	} else if err != nil {
 		return nil, err
 	}
-	
+
 	var messages []models.Message
 	for _, raw := range rawList {
 		var m models.Message

@@ -33,11 +33,11 @@ func TestChatHandler_HandleChatCompletions_Basic(t *testing.T) {
 
 	// 1. 构造依赖项
 	cfg := &config.Config{
-		RequestTimeout: 5 * time.Second,
+		RequestTimeout:        5 * time.Second,
 		TokenEstimationFactor: 4,
 	}
 	sr := router.NewSmartRouter(nil, nil, "weighted")
-	
+
 	// 这里通常需要 Mock gRPC Client，为保持示例简洁，此处暂不依赖真实 gRPC
 	h := NewChatHandler(nil, nil, sr, nil, cfg)
 	if h == nil {
@@ -46,10 +46,10 @@ func TestChatHandler_HandleChatCompletions_Basic(t *testing.T) {
 
 	// 2. 模拟请求
 	reqBody, _ := json.Marshal(models.ChatCompletionRequest{
-		Model: "gpt-4",
+		Model:    "gpt-4",
 		Messages: []models.Message{{Role: "user", Content: "hi"}},
 	})
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBuffer(reqBody))

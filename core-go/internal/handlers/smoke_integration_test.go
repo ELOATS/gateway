@@ -83,14 +83,14 @@ func TestPhase4SmokeScenarios(t *testing.T) {
 		prompt := strings.Repeat("hello ", 2000) // ~2000 tokens
 		tokens := len(prompt) / cfg.TokenEstimationFactor
 		userTier := "free"
-		
+
 		forceCheap := false
 		if userTier == "free" && tokens > 1500 {
 			forceCheap = true
 		}
 		assert.True(t, forceCheap, "超长文本对于免费用户应强制路由至廉价节点")
 	})
-	
+
 	t.Run("Audit_Log_Initialization", func(t *testing.T) {
 		// 验证 AuditRecord 结构是否完整
 		type AuditRecord struct {

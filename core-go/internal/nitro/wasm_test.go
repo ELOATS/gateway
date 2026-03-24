@@ -1,4 +1,4 @@
-package observability
+package nitro
 
 import (
 	"context"
@@ -15,7 +15,7 @@ func TestWasmNitroClientIntegration(t *testing.T) {
 
 	// 注入简单的规则：将 email 脱敏为 [EMAIL]
 	rules := `[{"pattern": "([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})", "replacement": "[EMAIL]"}]`
-	
+
 	client, err := NewWasmNitroClient(context.Background(), wasmPath, rules)
 	if err != nil {
 		t.Fatalf("Failed to create Wasm client: %v", err)
@@ -25,7 +25,7 @@ func TestWasmNitroClientIntegration(t *testing.T) {
 	// 测试脱敏逻辑
 	prompt := "Contact me at alice@example.com for details."
 	expected := "Contact me at [EMAIL] for details."
-	
+
 	sanitized, err := client.CheckInput(context.Background(), prompt)
 	if err != nil {
 		t.Fatalf("CheckInput failed: %v", err)

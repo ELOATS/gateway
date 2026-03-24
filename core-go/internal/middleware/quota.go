@@ -56,7 +56,7 @@ func QuotaLimiter(rdb *redis.Client, cfg *config.Config) gin.HandlerFunc {
 			if ttl < 0 {
 				ttl = 24 * time.Hour // 后备方案
 			}
-			
+
 			hours := int(ttl.Hours())
 			minutes := int(ttl.Minutes()) % 60
 

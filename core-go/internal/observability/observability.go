@@ -17,13 +17,6 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// NitroClient 定义了加速层客户端的统一接口，支持 gRPC 和 Wasm 两种实现。
-type NitroClient interface {
-	CheckInput(ctx context.Context, prompt string) (string, error)
-	CountTokens(ctx context.Context, model, text string) (int, error)
-	Close() error
-}
-
 // InitTracer 初始化 OpenTelemetry 追踪器。
 func InitTracer(ctx context.Context, collectorAddr string) (func(), error) {
 	if collectorAddr == "" {
@@ -109,7 +102,7 @@ var (
 		Help:    "每个节点的调用延迟",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"node"})
-	
+
 	// CacheHitsTotal 统计语义缓存的命中与未命中次数。
 	CacheHitsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_cache_hits_total",
@@ -141,6 +134,12 @@ var (
 		Name: "gateway_provider_errors_total",
 		Help: "上游提供商错误总数",
 	}, []string{"node", "error_type"})
+
+	// AuditDroppedTotal 统计因队列满而丢弃的审计日志数。
+	AuditDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gateway_audit_dropped_total",
+		Help: "丢弃的审计日志总数",
+	})
 )
 
 // InitLogger 初始化全局 JSON 结构化日志。

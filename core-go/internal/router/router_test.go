@@ -277,6 +277,7 @@ func TestSmartRouter_AllDisabledReturnsError(t *testing.T) {
 		t.Fatal("所有节点禁用时 Route 应返回错误")
 	}
 }
+
 // --- 基准测试 (Benchmarks) ---
 
 func BenchmarkWeightedStrategy_Select_10Nodes(b *testing.B) {

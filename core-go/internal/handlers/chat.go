@@ -10,11 +10,12 @@ import (
 	"strings"
 	"time"
 
+	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/config"
 	"github.com/ai-gateway/core/internal/middleware"
+	"github.com/ai-gateway/core/internal/nitro"
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
-	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -23,7 +24,7 @@ import (
 // ChatHandler 处理与聊天补全相关的 HTTP 请求。
 type ChatHandler struct {
 	intelligenceClient pb.AiLogicClient
-	nitroClient        observability.NitroClient
+	nitroClient        nitro.NitroClient
 	router             *router.SmartRouter
 	config             *config.Config
 	rdb                *redis.Client // Redis 客户端，用于更新配额
@@ -31,7 +32,7 @@ type ChatHandler struct {
 }
 
 // NewChatHandler 创建一个包含所需依赖的 ChatHandler 实例。
-func NewChatHandler(ic pb.AiLogicClient, nc observability.NitroClient, sr *router.SmartRouter, rdb *redis.Client, cfg *config.Config) *ChatHandler {
+func NewChatHandler(ic pb.AiLogicClient, nc nitro.NitroClient, sr *router.SmartRouter, rdb *redis.Client, cfg *config.Config) *ChatHandler {
 	limit := cfg.MaxConcurrentRequests
 	if limit <= 0 {
 		limit = 1000
@@ -161,7 +162,7 @@ func (h *ChatHandler) runGuardrails(c *gin.Context, ctx context.Context, rid, pr
 	pyResp, err := h.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
 	if err != nil {
 		slog.Error("智能审计服务异常", "request_id", rid, "error", err)
-		return prompt, true 
+		return prompt, true
 	}
 
 	if !pyResp.Safe {
@@ -187,7 +188,7 @@ func (h *ChatHandler) runOutputGuardrails(ctx context.Context, rid, text, model 
 
 	if !pyResp.Safe {
 		slog.Warn("输出安全拦截", "request_id", rid)
-		return pyResp.SanitizedText, true 
+		return pyResp.SanitizedText, true
 	}
 
 	return pyResp.SanitizedText, true
@@ -233,7 +234,7 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 	var firstTokenTime time.Time
 	streamStart := time.Now()
 	chunkCount := 0
-	fullResponse := ""
+	var fullResponseBuilder strings.Builder
 
 	// 流式滑动窗口：最多保留最近 100 个字符进行连续性敏感审查
 	slidingWindow := ""
@@ -253,7 +254,7 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 			if !ok {
 				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 				flusher.Flush()
-				
+
 				// 计算并记录流式吞吐量 TPS (Chunk/s 作为简化估算)
 				if firstTokenReceived {
 					duration := time.Since(firstTokenTime).Seconds()
@@ -262,7 +263,7 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 						observability.TPS.WithLabelValues(req.Model, node.Name).Observe(tps)
 					}
 				}
-				
+
 				// 异步落盘流式完整内容
 				if observability.GlobalAuditLogger != nil {
 					observability.GlobalAuditLogger.Log(&observability.AuditRecord{
@@ -272,11 +273,11 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 						Model:     req.Model,
 						Node:      node.Name,
 						Prompt:    h.extractPrompt(req),
-						Response:  fullResponse,
+						Response:  fullResponseBuilder.String(),
 						Tokens:    chunkCount,
 					})
 				}
-				
+
 				return
 			}
 
@@ -292,10 +293,12 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, req *mo
 			if len(streamResp.Choices) > 0 && streamResp.Choices[0].Delta.Content != "" {
 				chunkCount++
 				content := streamResp.Choices[0].Delta.Content
-				fullResponse += content
+				fullResponseBuilder.WriteString(content)
+
 				slidingWindow += content
-				if len(slidingWindow) > maxWindowSize {
-					slidingWindow = slidingWindow[len(slidingWindow)-maxWindowSize:]
+				runes := []rune(slidingWindow)
+				if len(runes) > maxWindowSize {
+					slidingWindow = string(runes[len(runes)-maxWindowSize:])
 				}
 
 				// 审查并实时阻断
@@ -338,7 +341,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
 			slog.Info("等待重试", "request_id", rid, "backoff_ms", backoff.Milliseconds())
-			
+
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -409,7 +412,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 		observability.RequestsTotal.WithLabelValues("200", req.Model).Inc()
 
 		slog.Info("请求完成", "request_id", rid, "duration_ms", duration.Milliseconds())
-		
+
 		// 异步合规审计落盘
 		if observability.GlobalAuditLogger != nil {
 			var respText string
@@ -427,7 +430,7 @@ func (h *ChatHandler) routeAndExecute(c *gin.Context, ctx context.Context, req *
 				Tokens:    resp.Usage.TotalTokens,
 			})
 		}
-		
+
 		c.JSON(http.StatusOK, resp)
 		return
 	}
