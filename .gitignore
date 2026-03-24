@@ -24,7 +24,9 @@ logic-python/*
 !logic-python/gateway_pb2.py
 !logic-python/gateway_pb2_grpc.py
 !logic-python/main.py
+!logic-python/prompt_injection.py
 !logic-python/test_cache.py
+!logic-python/test_prompt_injection.py
 !logic-python/uv.lock
 !logic-python/pyproject.toml
 !logic-python/requirements.txt

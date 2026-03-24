@@ -2,89 +2,231 @@ name: AI Gateway CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-gateway-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  go-ci:
-    name: Go Core (Orchestration)
+  changes:
+    name: Detect Changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            go:
+              - 'core-go/**'
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+            rust:
+              - 'utils-rust/**'
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+            python:
+              - 'logic-python/**'
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+            docs_only:
+              - '**/*.md'
+
+  go-ci:
+    name: Go Core
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: core-go
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: "1.25"
           cache-dependency-path: core-go/go.sum
 
-      - name: Install dependencies
-        run: |
-          cd core-go
-          go mod tidy
+      - name: Download modules
+        run: go mod download
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Static analysis
+        run: go vet ./... 2>&1 | tee go-vet.log
 
       - name: Build
-        run: |
-          cd core-go
-          go build -v ./...
+        run: go build -v ./... 2>&1 | tee go-build.log
 
       - name: Test
-        run: |
-          cd core-go
-          go test -v ./...
+        run: go test -v ./... 2>&1 | tee go-test.log
+
+      - name: Upload Go logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-ci-logs
+          path: |
+            core-go/go-vet.log
+            core-go/go-build.log
+            core-go/go-test.log
 
   rust-ci:
-    name: Rust Utils (Nitro)
+    name: Rust Nitro
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: utils-rust
+    env:
+      RUST_BACKTRACE: 1
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Protoc
-        run: sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Rust Cache
+      - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: utils-rust -> target
-          prefix-key: "v2-rust"
+          prefix-key: v3-rust
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check 2>&1 | tee rust-fmt.log
+
+      - name: Static analysis
+        run: cargo clippy --all-targets --all-features -- -D warnings 2>&1 | tee rust-clippy.log
 
       - name: Build
-        run: |
-          cd utils-rust
-          cargo build --verbose
+        run: cargo build --verbose 2>&1 | tee rust-build.log
 
       - name: Test
-        run: |
-          cd utils-rust
-          RUST_MIN_STACK=67108864 cargo test --verbose -- --test-threads=1 --nocapture
+        run: cargo test --verbose -- --test-threads=1 --nocapture 2>&1 | tee rust-test.log
+
+      - name: Upload Rust logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ci-logs
+          path: |
+            utils-rust/rust-fmt.log
+            utils-rust/rust-clippy.log
+            utils-rust/rust-build.log
+            utils-rust/rust-test.log
 
   python-ci:
-    name: Python Logic (Intelligence)
+    name: Python Logic
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: logic-python
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          version: "latest"
+          version: latest
 
       - name: Sync environment
-        run: |
-          cd logic-python
-          uv sync
+        run: uv sync 2>&1 | tee python-sync.log
 
-      - name: Verify Import
+      - name: Install lint tool
+        run: uv tool install ruff 2>&1 | tee python-ruff-install.log
+
+      - name: Lint
+        run: uv tool run ruff check . 2>&1 | tee python-lint.log
+
+      - name: Bytecode compile check
+        run: uv run python -m compileall . 2>&1 | tee python-compile.log
+
+      - name: Verify imports
+        run: uv run python -c "import main; import prompt_injection; print('Python module import successful')" 2>&1 | tee python-import.log
+
+      - name: Test
+        run: uv run python -m unittest test_prompt_injection.py test_cache.py 2>&1 | tee python-test.log
+
+      - name: Upload Python logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-ci-logs
+          path: |
+            logic-python/python-sync.log
+            logic-python/python-ruff-install.log
+            logic-python/python-lint.log
+            logic-python/python-compile.log
+            logic-python/python-import.log
+            logic-python/python-test.log
+
+  docs-only:
+    name: Docs Only
+    needs: changes
+    if: needs.changes.outputs.go != 'true' && needs.changes.outputs.rust != 'true' && needs.changes.outputs.python != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: No code changes detected
+        run: echo "Only documentation or non-code files changed; skipping language-specific CI jobs."
+
+  summary:
+    name: CI Summary
+    needs:
+      - changes
+      - go-ci
+      - rust-ci
+      - python-ci
+      - docs-only
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write summary
         run: |
-          cd logic-python
-          uv run python -c "import main; print('Python module import successful')"
+          echo "## AI Gateway CI Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Area | Changed | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Go | ${{ needs.changes.outputs.go }} | ${{ needs.go-ci.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Rust | ${{ needs.changes.outputs.rust }} | ${{ needs.rust-ci.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Python | ${{ needs.changes.outputs.python }} | ${{ needs.python-ci.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Docs-only path | ${{ needs.changes.outputs.docs_only }} | ${{ needs.docs-only.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifacts are uploaded automatically on failed Go, Rust, or Python jobs." >> "$GITHUB_STEP_SUMMARY"
