@@ -12,8 +12,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// QuotaLimiter 返回一个基于 Redis 的每日消费配额拦截中间件。
-// 它要求请求上下文中已经存在 "key_label" 和 "api_key"（由 Auth 中间件设置）。
+// QuotaLimiter 在请求进入执行阶段前检查租户的滚动 24 小时配额。
+// 它依赖 Auth 中间件提前写入 api_key，并把真正的扣账放到请求完成后的补偿路径。
 func QuotaLimiter(rdb *redis.Client, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetString("api_key")
@@ -22,8 +22,8 @@ func QuotaLimiter(rdb *redis.Client, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// 1. 查找该 Key 的配置配额
-		var limit int64 = 0
+		// 先从配置中查出该 key 的每日额度。
+		var limit int64
 		for _, entry := range cfg.APIKeys {
 			if entry.Key == apiKey {
 				limit = entry.DailyQuota
@@ -36,25 +36,22 @@ func QuotaLimiter(rdb *redis.Client, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// 2. 检查 Redis 中的当前累计值 (不再区分日期，依靠 TTL 滚动)
+		// 使用 Redis 中的滚动累计值做硬拦截。
 		redisKey := fmt.Sprintf("quota:usage:%s", apiKey)
-
 		usageStr, err := rdb.Get(c.Request.Context(), redisKey).Result()
 		if err == redis.Nil {
 			usageStr = "0"
 		} else if err != nil {
+			// Redis 异常时不在这里直接拒绝，由主链路按既定降级策略处理。
 			c.Next()
 			return
 		}
 
 		usage, _ := strconv.ParseInt(usageStr, 10, 64)
-
-		// 3. 判定是否超限
 		if usage >= limit {
-			// 获取 Redis Key 的剩余生存时间 (TTL)
 			ttl, _ := rdb.TTL(c.Request.Context(), redisKey).Result()
 			if ttl < 0 {
-				ttl = 24 * time.Hour // 后备方案
+				ttl = 24 * time.Hour
 			}
 
 			hours := int(ttl.Hours())
@@ -62,7 +59,7 @@ func QuotaLimiter(rdb *redis.Client, cfg *config.Config) gin.HandlerFunc {
 
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":   "quota_exceeded",
-				"message": fmt.Sprintf("您的配额已耗尽 (%d/%d Tokens)。将在 %d 小时 %d 分钟后重置。", usage, limit, hours, minutes),
+				"message": fmt.Sprintf("您的配额已耗尽（%d/%d Tokens），将在 %d 小时 %d 分钟后重置。", usage, limit, hours, minutes),
 			})
 			c.Abort()
 			return
@@ -72,11 +69,11 @@ func QuotaLimiter(rdb *redis.Client, cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-// UpdateQuotaUsage 用于在请求完成后异步更新配额消耗。
+// UpdateQuotaUsage 在请求完成后异步回写实际消耗。
+// Lua 脚本保证 INCRBY 和首次 EXPIRE 的原子性，避免并发下窗口错乱。
 func UpdateQuotaUsage(ctx context.Context, rdb *redis.Client, apiKey string, tokens int64) error {
 	redisKey := fmt.Sprintf("quota:usage:%s", apiKey)
 
-	// 使用 Lua 脚本确保 Incr 和 Expire(NX) 的原子性，实现固定 24 小时窗口
 	script := `
 		local current = redis.call("INCRBY", KEYS[1], ARGV[1])
 		if current == tonumber(ARGV[1]) then

@@ -4,6 +4,10 @@ kind: Deployment
 metadata:
   name: orchestration
   namespace: ai-gateway
+  labels:
+    app: orchestration
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/component: orchestration
 spec:
   replicas: 1
   selector:
@@ -47,12 +51,17 @@ kind: Service
 metadata:
   name: orchestration-service
   namespace: ai-gateway
+  labels:
+    app: orchestration
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/component: orchestration
 spec:
   type: NodePort
   selector:
     app: orchestration
   ports:
-    - protocol: TCP
+    - name: http
+      protocol: TCP
       port: 8080
       targetPort: 8080
       nodePort: 30080

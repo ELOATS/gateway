@@ -36,6 +36,7 @@ _prompt_detector: Optional[PromptInjectionDetector] = None
 
 
 def get_embedding_model() -> Any:
+    """按需加载 embedding 模型，避免服务启动时就拉起重依赖。"""
     global _embedding_model
     if _embedding_model is None:
         from sentence_transformers import SentenceTransformer
@@ -46,11 +47,13 @@ def get_embedding_model() -> Any:
 
 
 def encode_texts(texts: list[str]) -> list[list[float]]:
+    """把文本批量编码成向量，供缓存和轻量语义检测复用。"""
     vectors = get_embedding_model().encode(texts)
     return [list(vector) for vector in vectors]
 
 
 def get_qdrant_client() -> QdrantClient:
+    """延迟初始化 Qdrant 客户端，使缓存能力成为可选增强而非启动阻塞项。"""
     global _qdrant_client
     if _qdrant_client is None:
         _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
@@ -58,6 +61,7 @@ def get_qdrant_client() -> QdrantClient:
 
 
 def get_prompt_detector() -> PromptInjectionDetector:
+    """复用单例检测器，避免每次请求都重建规则和原型向量。"""
     global _prompt_detector
     if _prompt_detector is None:
         _prompt_detector = PromptInjectionDetector(embed_fn=encode_texts)
@@ -65,6 +69,7 @@ def get_prompt_detector() -> PromptInjectionDetector:
 
 
 def ensure_collection() -> None:
+    """确保语义缓存集合存在；失败只记日志，不阻断主服务启动。"""
     try:
         client = get_qdrant_client()
         collections = client.get_collections().collections
@@ -80,6 +85,7 @@ def ensure_collection() -> None:
 
 
 def get_request_id(context: grpc.ServicerContext) -> str:
+    """尽量从 gRPC metadata 中提取请求 ID，便于跨语言链路排查。"""
     if context is None:
         return "unknown"
     metadata = dict(context.invocation_metadata())
@@ -87,9 +93,18 @@ def get_request_id(context: grpc.ServicerContext) -> str:
 
 
 class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
+    """Python 智能增强服务。
+
+    这里承载的能力默认都应当是“可降级”的：即使不可用，也不能破坏 Go 主链路的基础正确性。
+    """
+
     def CheckInput(
         self, request: gateway_pb2.InputRequest, context: grpc.ServicerContext
     ) -> gateway_pb2.InputResponse:
+        """执行轻量输入护栏。
+
+        这里保留基础规则和可选语义检测；真正的关键护栏仍由 Go/Rust 主链路兜底。
+        """
         rid = get_request_id(context)
         logger.info("[RID:%s] running input guardrails", rid)
 
@@ -111,6 +126,7 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
     def CheckOutput(
         self, request: gateway_pb2.OutputRequest, context: grpc.ServicerContext
     ) -> gateway_pb2.OutputResponse:
+        """执行轻量输出护栏，用于补充非关键风险信号。"""
         rid = get_request_id(context)
         logger.info("[RID:%s] running output guardrails", rid)
 
@@ -122,6 +138,10 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
     def GetCache(
         self, request: gateway_pb2.CacheRequest, context: grpc.ServicerContext
     ) -> gateway_pb2.CacheResponse:
+        """按模型维度查询语义缓存。
+
+        缓存命中属于性能增强，不应改变请求是否被允许执行的主语义。
+        """
         rid = get_request_id(context)
         prompt = request.prompt
         target_model = request.model
@@ -163,6 +183,7 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
         return gateway_pb2.CacheResponse(hit=False)
 
     def _add_to_cache(self, prompt: str, response: str, model: str) -> None:
+        """把成功样本写回 Qdrant，供后续相似请求复用。"""
         vector = encode_texts([prompt])[0]
         point_id = str(uuid.uuid4())
 
@@ -187,6 +208,7 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
 
 
 def build_server_credentials():
+    """根据环境变量决定是否为 Python gRPC 服务开启 TLS/mTLS。"""
     if os.getenv("PYTHON_GRPC_TLS_ENABLED", "false").lower() != "true":
         return None
 
@@ -215,6 +237,7 @@ def build_server_credentials():
 
 
 def serve() -> None:
+    """启动 Python 侧 gRPC 服务。"""
     ensure_collection()
 
     port = os.getenv("PYTHON_GRPC_PORT", "50051")

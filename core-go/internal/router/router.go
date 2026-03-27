@@ -1,4 +1,3 @@
-// Package router 提供 AI 模型节点的智能路由与多策略选择引擎。
 package router
 
 import (
@@ -10,24 +9,24 @@ import (
 )
 
 var (
-	// ErrNoNodes 表示没有可用的模型节点。
+	// ErrNoNodes 表示当前没有可用于路由的节点。
 	ErrNoNodes = errors.New("无可用的模型节点")
 
-	// ErrNoStrategy 表示指定的策略不存在。
+	// ErrNoStrategy 表示请求指定了一个不存在的路由策略。
 	ErrNoStrategy = errors.New("指定的路由策略不存在")
 )
 
-// SmartRouter 是路由模块的核心调度器。
-// 优化为 Copy-on-Write (CoW) 机制，减少核心路径锁竞争。
+// SmartRouter 是模型路由模块的核心调度器。
+// 节点列表使用 Copy-on-Write 快照存储，读路径不需要拿锁，减少主链路竞争。
 type SmartRouter struct {
 	mu          sync.RWMutex
-	nodes       atomic.Value // 存储 []*ModelNode
+	nodes       atomic.Value // 存储 []*ModelNode 的只读快照
 	strategies  map[string]Strategy
 	defaultName string
 	Tracker     *HealthTracker
 }
 
-// NewSmartRouter 创建一个新的智能路由器实例。
+// NewSmartRouter 创建一个新的路由器实例。
 func NewSmartRouter(nodes []*ModelNode, tracker *HealthTracker, defaultStrategy string) *SmartRouter {
 	sr := &SmartRouter{
 		strategies:  make(map[string]Strategy),
@@ -38,7 +37,7 @@ func NewSmartRouter(nodes []*ModelNode, tracker *HealthTracker, defaultStrategy 
 	return sr
 }
 
-// RegisterStrategy 注册一种路由策略。
+// RegisterStrategy 注册一个可供请求选择的路由策略。
 func (sr *SmartRouter) RegisterStrategy(s Strategy) {
 	sr.mu.Lock()
 	sr.strategies[s.Name()] = s
@@ -46,13 +45,10 @@ func (sr *SmartRouter) RegisterStrategy(s Strategy) {
 	slog.Info("路由策略已注册", "strategy", s.Name())
 }
 
-// Route 是路由的核心入口。
-// 采用快照机制（CoW），读取节点列表无需获取锁。
+// Route 是统一的路由入口。
+// 它会先过滤可用节点，再按请求上下文选择策略；如果主策略没有选出节点，则退回 fallback。
 func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
-	// 快照读取。
 	nodes := sr.nodes.Load().([]*ModelNode)
-
-	// 过滤出所有已启用的节点，且排除指定的节点。
 	active := sr.filterNodesSnap(nodes, ctx.ExcludeNodes)
 	if len(active) == 0 {
 		return nil, ErrNoNodes
@@ -62,46 +58,43 @@ func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
 	strategyName := sr.resolveStrategy(ctx)
 	strategy, ok := sr.strategies[strategyName]
 	sr.mu.RUnlock()
-
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNoStrategy, strategyName)
 	}
 
 	slog.Info("路由策略选定", "request_id", ctx.RequestID, "strategy", strategyName)
-
-	// 执行策略选择。
 	node := strategy.Select(ctx, active)
 
 	if node == nil && strategyName != "fallback" {
 		sr.mu.RLock()
-		fb, exists := sr.strategies["fallback"]
+		fallback, exists := sr.strategies["fallback"]
 		sr.mu.RUnlock()
 		if exists {
-			slog.Warn("首选策略无结果，回退至故障转移", "strategy", strategyName, "request_id", ctx.RequestID)
-			node = fb.Select(ctx, active)
+			slog.Warn("主策略无结果，回退到 fallback", "request_id", ctx.RequestID, "strategy", strategyName)
+			node = fallback.Select(ctx, active)
 		}
 	}
 
 	if node == nil {
-		slog.Warn("所有策略无结果，使用首个可用节点", "request_id", ctx.RequestID)
+		slog.Warn("所有策略都未选出节点，使用第一个可用节点兜底", "request_id", ctx.RequestID)
 		node = active[0]
 	}
 
 	return node, nil
 }
 
-// UpdateNodes 动态更新模型节点列表（CoW 写入端）。
+// UpdateNodes 使用 CoW 方式替换整个节点快照。
 func (sr *SmartRouter) UpdateNodes(nodes []*ModelNode) {
 	sr.nodes.Store(nodes)
-	slog.Info("模型节点列表已更新（CoW）", "count", len(nodes))
+	slog.Info("模型节点列表已更新", "count", len(nodes))
 }
 
-// filterNodesSnap 基于快照进行过滤。
+// filterNodesSnap 在只读快照上执行过滤，不修改原始节点列表。
 func (sr *SmartRouter) filterNodesSnap(nodes []*ModelNode, exclude []string) []*ModelNode {
 	var active []*ModelNode
 	excludeMap := make(map[string]bool)
-	for _, e := range exclude {
-		excludeMap[e] = true
+	for _, name := range exclude {
+		excludeMap[name] = true
 	}
 
 	for _, n := range nodes {
@@ -112,7 +105,7 @@ func (sr *SmartRouter) filterNodesSnap(nodes []*ModelNode, exclude []string) []*
 	return active
 }
 
-// GetNodes 返回所有注册节点的副本。
+// GetNodes 返回节点快照的副本，避免调用方直接修改内部切片。
 func (sr *SmartRouter) GetNodes() []*ModelNode {
 	nodes := sr.nodes.Load().([]*ModelNode)
 	res := make([]*ModelNode, len(nodes))
@@ -120,7 +113,7 @@ func (sr *SmartRouter) GetNodes() []*ModelNode {
 	return res
 }
 
-// GetStrategies 返回所有已注册策略的名称列表。
+// GetStrategies 返回当前已注册的策略名列表。
 func (sr *SmartRouter) GetStrategies() []string {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
@@ -131,7 +124,7 @@ func (sr *SmartRouter) GetStrategies() []string {
 	return names
 }
 
-// resolveStrategy 内部辅助，需在持有读锁时调用。
+// resolveStrategy 根据请求头中的 hint 或默认值选择最终策略名。
 func (sr *SmartRouter) resolveStrategy(ctx *RouteContext) string {
 	if hint := ctx.Header("X-Route-Strategy"); hint != "" {
 		if _, ok := sr.strategies[hint]; ok {

@@ -1,4 +1,4 @@
-// Package adapters 提供各种 AI 服务供应商的对接实现。
+// Package adapters 提供各类 AI 服务提供商的适配实现。
 package adapters
 
 import (
@@ -14,32 +14,32 @@ import (
 	"github.com/ai-gateway/core/pkg/models"
 )
 
-// Provider 定义了不同 AI 提供者的统一调用接口。
+// Provider 定义不同 AI 提供者需要实现的统一调用接口。
 type Provider interface {
 	ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error)
 	ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error)
 }
 
-// ProviderType 定义支持的供应商类型。
+// ProviderType 表示当前支持的 provider 类型。
 type ProviderType string
 
 const (
 	OpenAI ProviderType = "openai"
 	Mock   ProviderType = "mock"
-	Plugin ProviderType = "plugin" // [Phase 5] 动态插件类型
+	Plugin ProviderType = "plugin" // 动态插件 provider。
 )
 
-// Config 包含创建适配器所需的配置信息。
+// Config 包含创建 provider 适配器所需的配置信息。
 type Config struct {
 	Type       ProviderType
 	APIKey     string
 	URL        string
 	Timeout    time.Duration
-	Name       string // 仅用于 Mock
-	PluginName string // [Phase 5] 插件名称，对应 configs/adapters/*.yaml
+	Name       string // 仅供 MockAdapter 使用。
+	PluginName string // 动态插件名称，对应 configs/adapters/*.yaml。
 }
 
-// NewProvider 是一个工厂函数，根据配置创建对应的 Provider 实例。
+// NewProvider 根据配置创建对应的 provider 实例。
 func NewProvider(cfg Config) (Provider, error) {
 	switch cfg.Type {
 	case OpenAI:
@@ -47,12 +47,11 @@ func NewProvider(cfg Config) (Provider, error) {
 	case Mock:
 		return &MockAdapter{Name: cfg.Name}, nil
 	case Plugin:
-		// 从全局注册表加载
 		plugin, ok := GlobalRegistry.GetPlugin(cfg.PluginName)
 		if !ok {
 			return nil, fmt.Errorf("plugin configuration not found: %s", cfg.PluginName)
 		}
-		// 若 YAML 里定义了 BaseURL，则覆盖 Config 中的 URL（或优先使用 Config）
+		// 若显式传入 URL，则优先覆盖插件默认地址，便于环境级重定向。
 		if cfg.URL != "" {
 			plugin.BaseURL = cfg.URL
 		}
@@ -62,7 +61,7 @@ func NewProvider(cfg Config) (Provider, error) {
 	}
 }
 
-// OpenAIAdapter 是用于调用 OpenAI 官方 API 的适配器。
+// OpenAIAdapter 负责与兼容 OpenAI 协议的上游服务通信。
 type OpenAIAdapter struct {
 	APIKey  string
 	URL     string
@@ -70,7 +69,7 @@ type OpenAIAdapter struct {
 	Client  *http.Client
 }
 
-// NewOpenAIAdapter 创建一个新的 OpenAI 适配器，配置由外部传入。
+// NewOpenAIAdapter 创建一个新的 OpenAI 适配器，并配置连接复用参数。
 func NewOpenAIAdapter(apiKey, url string, timeout time.Duration) *OpenAIAdapter {
 	return &OpenAIAdapter{
 		APIKey:  apiKey,
@@ -87,7 +86,7 @@ func NewOpenAIAdapter(apiKey, url string, timeout time.Duration) *OpenAIAdapter 
 	}
 }
 
-// ChatCompletion 执行向 OpenAI API 的聊天补全请求。
+// ChatCompletion 发起一次非流式聊天补全请求。
 func (a *OpenAIAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -119,7 +118,7 @@ func (a *OpenAIAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mode
 	return &result, nil
 }
 
-// ChatCompletionStream 执行流式补全请求。
+// ChatCompletionStream 发起 SSE 流式补全请求，并逐行转成标准 chunk 输出。
 func (a *OpenAIAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
 	respCh := make(chan *models.ChatCompletionStreamResponse)
 	errCh := make(chan error, 1)
@@ -170,7 +169,8 @@ func (a *OpenAIAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) 
 
 			var streamResp models.ChatCompletionStreamResponse
 			if err := json.Unmarshal([]byte(dataStr), &streamResp); err != nil {
-				continue // 忽略损坏的行
+				// 上游偶发坏行不直接中断整条流。
+				continue
 			}
 			respCh <- &streamResp
 		}
@@ -179,12 +179,12 @@ func (a *OpenAIAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) 
 	return respCh, errCh
 }
 
-// MockAdapter 是用于开发测试的模拟适配器。
+// MockAdapter 用于本地开发、压测和无外部依赖场景。
 type MockAdapter struct {
 	Name string
 }
 
-// ChatCompletion 模拟 AI 响应，用于本地开发与压测场景。
+// ChatCompletion 生成一个固定结构的模拟响应。
 func (a *MockAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	return &models.ChatCompletionResponse{
 		ID:      fmt.Sprintf("mock-%s-%d", a.Name, time.Now().Unix()),
@@ -209,7 +209,7 @@ func (a *MockAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models
 	}, nil
 }
 
-// ChatCompletionStream 模拟流式响应。
+// ChatCompletionStream 生成一个分块输出的模拟流式响应。
 func (a *MockAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
 	respCh := make(chan *models.ChatCompletionStreamResponse)
 	errCh := make(chan error, 1)
@@ -218,7 +218,7 @@ func (a *MockAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<
 		defer close(respCh)
 		defer close(errCh)
 
-		chunks := []string{"你好", "！", "我是", "一个", "来自", "网关", "的", "流式", "响应", "。"}
+		chunks := []string{"你好", "，", "我是", "一个", "来自", "网关", "的", "流式", "响应", "。"}
 		for i, text := range chunks {
 			respCh <- &models.ChatCompletionStreamResponse{
 				ID:      fmt.Sprintf("mock-stream-%d", time.Now().Unix()),

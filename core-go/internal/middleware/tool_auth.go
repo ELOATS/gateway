@@ -15,8 +15,8 @@ const (
 	toolAuthScanBytes    = 256 * 1024
 )
 
-// ToolAuthMiddleware validates access to agentic tool usage without forcing every
-// chat request through the stricter tool-call body limit.
+// ToolAuthMiddleware 检查当前请求是否尝试使用 tools / tool_choice。
+// 它只做“工具调用权限”这一件事，并尽量避免把所有大请求都完整读入内存。
 func ToolAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		prefix, rest, err := readBodyPrefix(c.Request.Body, toolAuthScanBytes)
@@ -26,11 +26,10 @@ func ToolAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Restore the original stream for downstream handlers by default.
+		// 默认先把读取过的前缀和剩余 body 重新拼回去，保证下游还能按原请求读取。
 		c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix), rest))
 
-		// Large non-tool requests, such as multimodal payloads with inline images,
-		// should not be fully buffered here.
+		// 对超大但明显不是工具调用的请求直接放行，避免误伤多模态场景。
 		if c.Request.ContentLength > toolAuthMaxBodyBytes && !mightContainToolCall(prefix) {
 			c.Next()
 			return
@@ -68,6 +67,7 @@ func ToolAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// readBodyPrefix 只读取有限前缀，用于做轻量探测而不是整包解析。
 func readBodyPrefix(body io.ReadCloser, limit int64) ([]byte, io.Reader, error) {
 	defer body.Close()
 
@@ -79,6 +79,7 @@ func readBodyPrefix(body io.ReadCloser, limit int64) ([]byte, io.Reader, error) 
 	return prefix, body, nil
 }
 
+// mightContainToolCall 基于 JSON 字段名做快速启发式判断。
 func mightContainToolCall(prefix []byte) bool {
 	return bytes.Contains(prefix, []byte(`"tools"`)) || bytes.Contains(prefix, []byte(`"tool_choice"`))
 }

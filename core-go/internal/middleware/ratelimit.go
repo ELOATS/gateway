@@ -19,14 +19,13 @@ type localLimiter struct {
 	lastSeen time.Time
 }
 
-// RateLimiter 返回一个 Gin 中间件，支持基于 Redis 的分布式滑动窗口限流。
-// 如果 Redis 不可用，将自动降级为本地内存令牌桶限流。
+// RateLimiter 返回一个 Gin 中间件，优先使用 Redis 做分布式限流。
+// 当 Redis 不可用时，会自动退化到进程内令牌桶，保证保护措施仍然存在。
 func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
-	// 本地降级限流器池（用于 Redis 故障或未配置时）。
 	localLimiters := make(map[string]*localLimiter)
 	var mu sync.Mutex
 
-	// 后台清理过期限流器
+	// 本地限流器只在降级路径使用，因此定期回收长期不活跃的租户状态即可。
 	go func() {
 		for {
 			time.Sleep(10 * time.Minute)
@@ -47,7 +46,6 @@ func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
 			label = "anonymous"
 		}
 
-		// 优先尝试 Redis 分布式限流。
 		if rdb != nil {
 			allowed, err := checkRedisLimit(c.Request.Context(), rdb, label, qps, burst)
 			if err == nil {
@@ -58,11 +56,10 @@ func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
 				c.Next()
 				return
 			}
-			// Redis 故障，降级到本地逻辑。
-			slog.Warn("分布式限流异常，降级至本地限流", "label", label, "error", err)
+
+			slog.Warn("分布式限流异常，降级到本地限流", "label", label, "error", err)
 		}
 
-		// 本地限流逻辑。
 		mu.Lock()
 		le, ok := localLimiters[label]
 		if !ok {
@@ -81,20 +78,22 @@ func RateLimiter(rdb *redis.Client, qps float64, burst int) gin.HandlerFunc {
 	}
 }
 
-// checkRedisLimit 使用 Redis 脚本实现滑动窗口限流。
+// checkRedisLimit 用 Redis 有序集合近似实现 1 秒滑动窗口限流。
 func checkRedisLimit(ctx context.Context, rdb *redis.Client, label string, qps float64, burst int) (bool, error) {
 	key := "rl:" + label
-	now := time.Now().UnixNano() / 1e6 // 毫秒
-	window := int64(1000)              // 1秒滑动窗口
-	limit := int64(qps)                // 粗略 QPS 限制
+	now := time.Now().UnixNano() / 1e6
+	window := int64(1000)
+	limit := int64(qps)
+	if burst > 0 && int64(burst) > limit {
+		limit = int64(burst)
+	}
 
-	// Lua 脚本实现：1. 清理过期数据 2. 统计计数 3. 判断并写入
 	script := `
 		local key = KEYS[1]
 		local now = tonumber(ARGV[1])
 		local window = tonumber(ARGV[2])
 		local limit = tonumber(ARGV[3])
-		
+
 		redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
 		local count = redis.call('ZCARD', key)
 		if count >= limit then

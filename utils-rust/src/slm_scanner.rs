@@ -1,24 +1,24 @@
 use std::error::Error;
 
-/// ScannerResult 存储从上下文中提取到的敏感实体。
+/// ScannerResult 表示从文本中识别出的一个敏感实体。
 #[derive(Debug, Clone)]
 pub struct ScannerResult {
-    pub entity_type: String, // 如 "PHI" (医疗), "Financial" (金融), "Name" (姓名)
+    pub entity_type: String, // 例如 PHI、Financial、Name。
     pub start: usize,
     pub end: usize,
     pub text: String,
 }
 
-/// SlmScanner 定义了基于小型语言模型（SLM）进行深度脱敏的抽象层。
-/// 
-/// 未来规划：
-/// 1. 通过 `tch-rs` 或 `ort` (ONNX Runtime) 加载本地部署的极小参数量 NER 模型（如 100M 参数的 BERT 变体）。
-/// 2. 在正则引擎 (Regex) 之后作为补充方案运行，专门狩猎“无固定模式”的上下文隐私泄漏。
+/// SlmScanner 定义基于小型语言模型的深度脱敏抽象。
+///
+/// 这个接口定位在“正则规则之后的补充层”：
+/// 1. 未来可以接入本地 NER/分类模型，识别无固定模式的敏感片段。
+/// 2. 当前网关主链路不依赖它，因此它更适合作为增强能力逐步演进。
 pub trait SlmScanner: Send + Sync {
-    /// scan 分析给定的长文本，返回检测到的敏感实体列表。
+    /// scan 分析输入文本，返回识别到的敏感实体列表。
     fn scan(&self, text: &str) -> Result<Vec<ScannerResult>, Box<dyn Error>>;
 
-    /// sanitize 将检测到的实体通过特定的 Mask 或 Hash 算法替换，并返回安全文本。
+    /// sanitize 根据 scan 结果生成脱敏后的安全文本。
     fn sanitize(&self, text: &str) -> Result<String, Box<dyn Error>> {
         let entities = self.scan(text)?;
         if entities.is_empty() {
@@ -27,28 +27,28 @@ pub trait SlmScanner: Send + Sync {
 
         let mut safe_text = String::with_capacity(text.len());
         let mut last_end = 0;
-        
+
         for entity in entities {
             if entity.start >= last_end {
                 safe_text.push_str(&text[last_end..entity.start]);
-                // 替换为标准的实体类型标识
+                // 统一替换成标准实体标签，便于上层继续处理和审计。
                 safe_text.push_str(&format!("[{}_MASKED]", entity.entity_type));
                 last_end = entity.end;
             }
         }
-        
+
         safe_text.push_str(&text[last_end..]);
         Ok(safe_text)
     }
 }
 
-/// MockSlmScanner 是一个预研阶段的空白实现，用于目前架构的占位与依赖注入。
+/// MockSlmScanner 是当前阶段的占位实现。
+/// 它保留了接口形状，便于未来无缝替换成真实模型推理。
 pub struct MockSlmScanner;
 
 impl SlmScanner for MockSlmScanner {
     fn scan(&self, _text: &str) -> Result<Vec<ScannerResult>, Box<dyn Error>> {
-        // [预研阶段]: 尚未加载真实模型，目前直接返回空。
-        // TBD: 初始化 ONNX Runtime Session 并在此处执行推断。
+        // 预研阶段暂不加载真实模型，这里先返回空结果。
         Ok(vec![])
     }
 }

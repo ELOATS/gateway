@@ -11,6 +11,8 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
+// wasmInstance 持有一个具体的 Wasm 模块实例及其导出函数句柄。
+// 之所以拆出这个结构，是为了让实例池复用时不必反复查找导出函数。
 type wasmInstance struct {
 	module      api.Module
 	malloc      api.Function
@@ -21,13 +23,16 @@ type wasmInstance struct {
 	freeString  api.Function
 }
 
-// WasmNitroClient is a local Wazero-backed Nitro implementation.
+// WasmNitroClient 是基于 wazero 的本地 Nitro 实现。
+// 它通过 sync.Pool 复用多个实例，避免单实例串行化成为热点瓶颈。
 type WasmNitroClient struct {
 	runtime wazero.Runtime
 	code    wazero.CompiledModule
 	pool    sync.Pool
 }
 
+// NewWasmNitroClient 加载 Wasm 模块并预热一个实例。
+// 预热失败会直接返回错误，避免把“规则注入失败”延迟到首次请求时才暴露。
 func NewWasmNitroClient(ctx context.Context, wasmPath string, sensitiveRules string) (*WasmNitroClient, error) {
 	wasmBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
@@ -56,7 +61,6 @@ func NewWasmNitroClient(ctx context.Context, wasmPath string, sensitiveRules str
 		return inst
 	}
 
-	// Warm one instance so constructor failures surface immediately.
 	inst, err := newWasmInstance(ctx, r, code, sensitiveRules)
 	if err != nil {
 		_ = code.Close(ctx)
@@ -68,6 +72,7 @@ func NewWasmNitroClient(ctx context.Context, wasmPath string, sensitiveRules str
 	return client, nil
 }
 
+// newWasmInstance 实例化一个新的 Wasm 模块，并在创建时完成规则同步。
 func newWasmInstance(ctx context.Context, runtime wazero.Runtime, code wazero.CompiledModule, sensitiveRules string) (*wasmInstance, error) {
 	mod, err := runtime.InstantiateModule(ctx, code, wazero.NewModuleConfig().WithName(""))
 	if err != nil {
@@ -94,6 +99,7 @@ func newWasmInstance(ctx context.Context, runtime wazero.Runtime, code wazero.Co
 	return inst, nil
 }
 
+// syncRulesInst 把当前规则表写入指定实例，确保每个实例都持有一致的脱敏规则。
 func syncRulesInst(ctx context.Context, inst *wasmInstance, rules string) error {
 	ptr, sz, err := copyStringToWasm(ctx, inst, rules)
 	if err != nil {
@@ -126,6 +132,7 @@ func (c *WasmNitroClient) CheckInput(ctx context.Context, prompt string) (string
 	return getString(inst, resPtr)
 }
 
+// getString 从 Wasm 线性内存读取以 NUL 结尾的字符串，并做基本边界保护。
 func getString(inst *wasmInstance, offset uint64) (string, error) {
 	mem := inst.module.Memory()
 	off32 := uint32(offset)
@@ -152,6 +159,7 @@ func getString(inst *wasmInstance, offset uint64) (string, error) {
 	return string(bytes), nil
 }
 
+// copyStringToWasm 在 Wasm 侧分配内存并写入 Go 字符串。
 func copyStringToWasm(ctx context.Context, inst *wasmInstance, s string) (uint64, uint32, error) {
 	size := uint64(len(s) + 1)
 
@@ -167,6 +175,7 @@ func copyStringToWasm(ctx context.Context, inst *wasmInstance, s string) (uint64
 	return ptr, uint32(size), nil
 }
 
+// freeWasmPtr 释放先前分配给字符串拷贝的 Wasm 内存。
 func freeWasmPtr(ctx context.Context, inst *wasmInstance, ptr uint64, size uint32) {
 	inst.freePtr.Call(ctx, ptr, uint64(size))
 }
@@ -194,6 +203,7 @@ func (c *WasmNitroClient) CountTokens(ctx context.Context, model, text string) (
 	return int(results[0]), nil
 }
 
+// Close 关闭底层 wazero runtime，释放所有实例相关资源。
 func (c *WasmNitroClient) Close() error {
 	return c.runtime.Close(context.Background())
 }

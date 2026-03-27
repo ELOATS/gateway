@@ -8,7 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Registry 存储所有通过 YAML 加载的动态插件。
+// Registry 保存所有通过 YAML 加载的动态插件配置。
 type Registry struct {
 	Plugins map[string]PluginConfig
 }
@@ -17,12 +17,13 @@ var GlobalRegistry = &Registry{
 	Plugins: make(map[string]PluginConfig),
 }
 
-// LoadPlugins 从指定目录及子目录搜索 .yaml 或 .yml 文件。
+// LoadPlugins 扫描目录中的 yaml/yml 文件并注册插件。
+// 对单个文件的解析失败只打印警告，不会阻塞整个网关启动。
 func (r *Registry) LoadPlugins(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			os.MkdirAll(dir, 0755)
+			os.MkdirAll(dir, 0o755)
 			return nil
 		}
 		return err
@@ -53,7 +54,7 @@ func (r *Registry) LoadPlugins(dir string) error {
 	return nil
 }
 
-// GetPlugin 根据名称查找已加载的插件配置。
+// GetPlugin 按名称获取已加载的插件配置。
 func (r *Registry) GetPlugin(name string) (PluginConfig, bool) {
 	p, ok := r.Plugins[name]
 	return p, ok

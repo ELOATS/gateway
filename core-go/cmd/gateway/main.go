@@ -1,4 +1,3 @@
-// main 是 AI 网关核心服务的入口点。
 package main
 
 import (
@@ -19,63 +18,79 @@ import (
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/router"
 	"github.com/ai-gateway/core/internal/routes"
-	"github.com/redis/go-redis/v9"
+	"github.com/ai-gateway/core/internal/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 )
 
+// main 只保留“按顺序装配系统”的主流程：
+// 加载配置、初始化依赖、组装 handler/router，最后启动 HTTP 服务。
 func main() {
-	// 1. 加载配置：解析 .env 文件与环境变量。
-	cfg := config.LoadConfig()
+	cfg := mustLoadConfig()
 
-	// 2. 初始化日志：配置标准化的结构化 JSON 日志输出。
 	observability.InitLogger()
-	slog.Info("正在初始化 AI 网关核心", "port", cfg.Port)
+	slog.Info("initializing ai gateway core", "port", cfg.Port)
 
-	// 3. 加载动态插件 (Phase 5)
-	pluginDir := "configs/adapters"
-	_ = os.MkdirAll(pluginDir, 0755)
-	if err := adapters.GlobalRegistry.LoadPlugins(pluginDir); err != nil {
-		slog.Warn("加载动态插件失败", "dir", pluginDir, "error", err)
-	} else {
-		slog.Info("动态插件解析完成", "count", len(adapters.GlobalRegistry.Plugins))
-	}
-
-	// 4. 初始化 OpenTelemetry 追踪。
-	shutdownTracer, err := observability.InitTracer(context.Background(), cfg.OTELCollectorAddr)
-	if err != nil {
-		slog.Warn("无法初始化追踪器", "error", err)
-	}
+	status := InitRuntimeStatus(cfg)
+	LoadDynamicPlugins("configs/adapters")
+	shutdownTracer := InitObservability(cfg)
 	defer shutdownTracer()
 
-	// 初始化合规审计下沉服务
-	if err := observability.InitGlobalAuditLogger("audit_compliance.log"); err != nil {
-		slog.Warn("合规日志初始化失败，继续启动但无持久化能力", "error", err)
-	} else {
-		slog.Info("全量合规审计模块已上线，落盘至: audit_compliance.log")
-	}
-
-	// 初始化 Redis 客户端。
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
-	})
-	// 验证连接。
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		slog.Warn("无法连接至 Redis，分布式限流将不可用", "error", err)
-	} else {
-		slog.Info("Redis 连接成功", "addr", cfg.RedisAddr)
-	}
+	rdb := InitRedis(cfg, status)
 	defer rdb.Close()
 
-	// gRPC 连接选项：配置不安全凭据与自适应补偿重试。
-	transportCredentials, err := buildGRPCTransportCredentials(cfg)
-	if err != nil {
-		log.Fatalf("致命错误: 无法初始化 gRPC 传输凭据: %v", err)
+	dialOpts := mustBuildGRPCDialOptions(cfg)
+	intelligenceClient, pyConn := mustDial(cfg.PythonAddr, dialOpts...)
+	defer pyConn.Close()
+	status.Set(runtime.DependencyStatus{Name: "python", Required: false, Healthy: true, Status: "ready", Version: cfg.PythonAddr, FailureMode: cfg.PythonInputFailureMode})
+
+	nitroClient, nitroVersion := initNitro(cfg, dialOpts, status)
+	defer nitroClient.Close()
+
+	sr, _ := initSmartRouter(cfg, initNodes(cfg))
+	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, rdb, cfg)
+	adminHandler := handlers.NewAdminHandler(sr, rdb, status)
+
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: routes.NewRouter(chatHandler, adminHandler, rdb, cfg, status),
 	}
 
-	dialOpts := []grpc.DialOption{
+	runHTTPServer(srv, cfg, nitroVersion)
+	waitForShutdown(srv)
+}
+
+func mustLoadConfig() *config.Config {
+	cfg := config.LoadConfig()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("fatal configuration error: %v", err)
+	}
+	return cfg
+}
+
+// InitObservability 初始化 tracing 和审计能力。
+func InitObservability(cfg *config.Config) func() {
+	shutdownTracer, err := observability.InitTracer(context.Background(), cfg.OTELCollectorAddr)
+	if err != nil {
+		slog.Warn("failed to initialize tracer", "error", err)
+	}
+
+	if err := observability.InitGlobalAuditLogger("audit_compliance.log"); err != nil {
+		slog.Warn("failed to initialize audit logger", "error", err)
+	} else {
+		slog.Info("audit logger initialized", "path", "audit_compliance.log")
+	}
+
+	return shutdownTracer
+}
+
+func mustBuildGRPCDialOptions(cfg *config.Config) []grpc.DialOption {
+	transportCredentials, err := BuildGRPCTransportCredentials(cfg)
+	if err != nil {
+		log.Fatalf("fatal grpc transport setup error: %v", err)
+	}
+
+	return []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: backoff.Config{
@@ -84,143 +99,131 @@ func main() {
 			},
 		}),
 	}
+}
 
-	// 3. 建立 gRPC 连接：
-	intelligenceClient, pyConn := mustDial(cfg.PythonAddr, dialOpts...)
-	defer pyConn.Close()
-
-	// 3. 初始化 Nitro 平面 (Wasm 优先，gRPC 为 Fallback)：
-	var nitroClient nitro.NitroClient
-	wasmPath := "wasm/nitro.wasm"
-
-	if _, err := os.Stat(wasmPath); err == nil {
-		slog.Info("检测到 NITRO 2.0 (Wasm) 核心，正在尝试注入...")
-		// 读取敏感词配置用于注入 Wasm
-		rules, _ := os.ReadFile("configs/sensitive.txt")
-		c, err := nitro.NewWasmNitroClient(context.Background(), wasmPath, string(rules))
-		if err == nil {
-			nitroClient = c
-			slog.Info("NITRO 2.0 (Wasm) 即时加速平面就绪")
-		} else {
-			slog.Warn("Wasm 核心注入失败，落回 gRPC 模式", "error", err)
-		}
-	}
-
-	if nitroClient == nil {
-		rsClient, rsConn := mustDial(cfg.RustAddr, dialOpts...)
-		defer rsConn.Close()
-		nitroClient = &nitro.GrpcNitroClient{Client: rsClient}
-		slog.Info("NITRO 1.0 (gRPC) 通讯平面就绪")
-	}
-
-	// 4. 初始化核心路由组件与业务 Handler：
-	nodes := initNodes(cfg)
-	sr, _ := initSmartRouter(cfg, nodes)
-
-	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, rdb, cfg)
-	adminHandler := handlers.NewAdminHandler(sr, rdb)
-	routerEngine := routes.NewRouter(chatHandler, adminHandler, rdb, cfg)
-
-	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: routerEngine,
-	}
-
-	// 6. 启动服务（在 goroutine 中）：
+// runHTTPServer 在后台启动 HTTP 服务，并打印关键启动信息。
+func runHTTPServer(srv *http.Server, cfg *config.Config, nitroVersion string) {
 	go func() {
-		slog.Info("AI 网关核心服务已就绪",
+		slog.Info("ai gateway core ready",
 			"addr", srv.Addr,
 			"keys_loaded", len(cfg.APIKeys),
 			"ratelimit_qps", cfg.RateLimitQPS,
+			"nitro_backend", nitroVersion,
 		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("致命错误: 服务器异常退出: %v", err)
+			log.Fatalf("fatal server error: %v", err)
 		}
 	}()
+}
 
-	// 7. 优雅关停：监听中断信号。
+// waitForShutdown 统一处理进程信号和优雅关闭逻辑。
+func waitForShutdown(srv *http.Server) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	slog.Info("正在关闭服务器...")
 
-	// 设定关停超时。
+	slog.Info("shutting down gateway")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("服务器强制关闭", "error", err)
+		slog.Error("server forced to close", "error", err)
 	}
 
 	if observability.GlobalAuditLogger != nil {
-		observability.GlobalAuditLogger.Close(ctx)
+		_ = observability.GlobalAuditLogger.Close(ctx)
 	}
-
-	slog.Info("服务器已退出")
 }
 
-// initNodes 根据配置初始化模型节点。
+// initNitro 优先尝试 Wasm Nitro；失败后再退回 gRPC Nitro。
+// 它会同步更新依赖状态，确保 readiness 和监控看到的是显式结果。
+func initNitro(cfg *config.Config, dialOpts []grpc.DialOption, status *runtime.SystemStatus) (nitro.NitroClient, string) {
+	wasmPath := "wasm/nitro.wasm"
+	if _, err := os.Stat(wasmPath); err == nil {
+		rules, _ := os.ReadFile("configs/sensitive.txt")
+		client, wasmErr := nitro.NewWasmNitroClient(context.Background(), wasmPath, string(rules))
+		if wasmErr == nil {
+			status.Set(runtime.DependencyStatus{Name: "nitro", Required: true, Healthy: true, Status: "ready", Version: "wasm", FailureMode: cfg.NitroFailureMode})
+			return client, "wasm"
+		}
+
+		slog.Warn("wasm nitro initialization failed; falling back to grpc", "error", wasmErr)
+		status.Set(runtime.DependencyStatus{Name: "nitro", Required: true, Healthy: false, Status: "degraded", Reason: wasmErr.Error(), Version: "wasm", FailureMode: cfg.NitroFailureMode})
+	}
+
+	rsClient, rsConn := mustDial(cfg.RustAddr, dialOpts...)
+	status.Set(runtime.DependencyStatus{Name: "nitro", Required: true, Healthy: true, Status: "ready", Version: "grpc:" + cfg.RustAddr, FailureMode: cfg.NitroFailureMode})
+	return &nitro.GrpcNitroClient{Client: rsClient, Conn: rsConn}, "grpc"
+}
+
+// initNodes 根据配置构造上游模型节点列表。
+// 有真实 OpenAI 配置时走真实节点，否则回退到 mock 节点，便于本地开发。
 func initNodes(cfg *config.Config) []*router.ModelNode {
 	if cfg.OpenAIApiKey != "" && cfg.OpenAIApiKey != "your-openai-api-key-here" {
-		slog.Info("已注册 OpenAI 真实适配器", "model_id", "gpt-4")
+		slog.Info("registering openai adapter", "model_id", "gpt-4")
 		adapter, _ := adapters.NewProvider(adapters.Config{
 			Type:    adapters.OpenAI,
 			APIKey:  cfg.OpenAIApiKey,
 			URL:     cfg.OpenAIURL,
 			Timeout: cfg.OpenAITimeout,
 		})
-		return []*router.ModelNode{
-			{
-				Name:      "OpenAI-主节点",
-				ModelID:   "gpt-4",
-				Adapter:   adapter,
-				Weight:    100,
-				CostPer1K: 0.03,
-				Quality:   0.95,
-				Tags:      map[string]string{"tier": "premium", "provider": "openai"},
-				Enabled:   true,
-			},
-		}
+		return []*router.ModelNode{{
+			Name:      "openai-primary",
+			ModelID:   "gpt-4",
+			Adapter:   adapter,
+			Weight:    100,
+			CostPer1K: 0.03,
+			Quality:   0.95,
+			Tags:      map[string]string{"tier": "premium", "provider": "openai"},
+			Enabled:   true,
+		}}
 	}
 
-	slog.Warn("未检测到 OpenAI API Key，将使用 Mock 适配器。")
+	slog.Warn("openai api key missing; using mock adapters")
 	mock1, _ := adapters.NewProvider(adapters.Config{Type: adapters.Mock, Name: "Primary"})
 	mock2, _ := adapters.NewProvider(adapters.Config{Type: adapters.Mock, Name: "Secondary"})
 
 	return []*router.ModelNode{
 		{
-			Name: "主模拟节点", ModelID: "mock-primary",
-			Adapter: mock1, Weight: 80,
-			CostPer1K: 0.001, Quality: 0.7,
-			Tags: map[string]string{"tier": "standard"}, Enabled: true,
+			Name:      "mock-primary",
+			ModelID:   "mock-primary",
+			Adapter:   mock1,
+			Weight:    80,
+			CostPer1K: 0.001,
+			Quality:   0.7,
+			Tags:      map[string]string{"tier": "standard"},
+			Enabled:   true,
 		},
 		{
-			Name: "备用模拟节点", ModelID: "mock-secondary",
-			Adapter: mock2, Weight: 20,
-			CostPer1K: 0.0005, Quality: 0.5,
-			Tags: map[string]string{"tier": "economy"}, Enabled: true,
+			Name:      "mock-secondary",
+			ModelID:   "mock-secondary",
+			Adapter:   mock2,
+			Weight:    20,
+			CostPer1K: 0.0005,
+			Quality:   0.5,
+			Tags:      map[string]string{"tier": "economy"},
+			Enabled:   true,
 		},
 	}
 }
 
-// initSmartRouter 初始化路由器并注册所有路由策略。
+// initSmartRouter 注册默认路由策略和规则策略。
 func initSmartRouter(cfg *config.Config, nodes []*router.ModelNode) (*router.SmartRouter, *router.HealthTracker) {
 	tracker := router.NewHealthTracker(cfg.HealthAlpha)
 	sr := router.NewSmartRouter(nodes, tracker, cfg.RouteStrategy)
 
-	// 注册所有路由策略：
 	sr.RegisterStrategy(&router.WeightedStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.CostStrategy{MinQuality: 0.6})
 	sr.RegisterStrategy(&router.LatencyStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.QualityStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.FallbackStrategy{Tracker: tracker})
 
-	// 规则路由：示例规则（按需自定义）。
 	sr.RegisterStrategy(router.NewRuleStrategy([]router.Rule{
 		{
-			Name:     "VIP 用户路由到 Premium 节点",
+			Name:     "vip-users-to-premium-node",
 			Priority: 1,
-			Target:   "OpenAI-主节点",
+			Target:   "openai-primary",
 			Condition: func(ctx *router.RouteContext) bool {
 				return ctx.UserTier == "admin" || ctx.UserTier == "vip"
 			},
@@ -230,13 +233,13 @@ func initSmartRouter(cfg *config.Config, nodes []*router.ModelNode) (*router.Sma
 	return sr, tracker
 }
 
-// mustDial 建立与目标地址的 gRPC 连接。
-// 该方法会同步等待连接基础架构初始化，并在连接失败时触发程序强制退出以符合云原生 Fail-Fast 原则。
+// mustDial 用于建立关键 gRPC 连接。
+// 这里保持 fail-fast，避免服务在关键依赖缺失时以“半可用”状态启动。
 func mustDial(addr string, opts ...grpc.DialOption) (pb.AiLogicClient, *grpc.ClientConn) {
 	conn, err := grpc.Dial(addr, opts...)
 	if err != nil {
-		slog.Error("gRPC 连接建立失败", "target", addr, "error", err)
-		log.Fatalf("致命错误: 无法连接至后端服务 %s: %v", addr, err)
+		slog.Error("grpc dial failed", "target", addr, "error", err)
+		log.Fatalf("fatal dial error for %s: %v", addr, err)
 	}
 	return pb.NewAiLogicClient(conn), conn
 }

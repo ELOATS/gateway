@@ -1,68 +1,38 @@
-# 🚀 AI 网关部署指南 (Kubernetes / Minikube)
+# AI 网关 Kubernetes / Minikube 本地部署指南
 
-本指南旨在指导开发者在本地 **minikube** 环境中快速部署并运行 AI 网关。系统采用 **Go (编排层)**、**Rust (加速层)** 与 **Python (智能层)** 的三层平面架构，通过 gRPC 实现高性能通信。
+本文档用于指导你在本地 Minikube 中完整部署当前版本的 AI 网关，并包含监控资源的接入步骤。
 
----
+## 1. 准备环境
 
-## 🏗️ 1. 系统架构概览
+请先安装以下工具：
 
-| 平面 (Plane) | 技术栈 | 服务名称 (K8s Service) | 职责 |
-| :--- | :--- | :--- | :--- |
-| **基础设施** | **Redis** | `redis-service` | 分布式限流、状态共享 |
-| **编排层 (Orchestration)** | **Go** | `orchestration-service` | 入口、路由、可观测性、身份验证 |
-| **加速层 (Nitro)** | **Rust** | `nitro-service` | PII 脱敏、Token 计数 (高性能正则/分词) |
-| **智能层 (Intelligence)** | **Python** | `intelligence-service` | 语义缓存 (FAISS)、安全审计、幻觉检测 |
+- Docker Desktop
+- `kubectl`
+- `minikube`
 
----
-
-## 🛠️ 2. 环境准备
-
-1.  **基础设施**: 安装 [minikube](https://minikube.sigs.k8s.io/docs/start/)、[kubectl](https://kubernetes.io/docs/tasks/tools/) 和 Docker Desktop。
-2.  **Docker 镜像加速**: 在 Docker Desktop 中配置 `registry-mirrors` 以加速基础镜像下载。
-3.  **启动 Minikube**:
-    ```powershell
-    minikube start --cpus=4 --memory=8192
-    ```
-
----
-
-## ⚙️ 3. 配置管理 (.env)
-
-在项目根目录创建 `.env` 文件（由 `.gitignore` 保护，不提交）：
-
-```bash
-# --- 统一配置 ---
-PORT=8080
-GATEWAY_API_KEY=sk-gw-default-123456
-OPENAI_API_KEY=sk-xxxx...  # 填入你的真实 Key 以启用转发
-
-# --- 内部 gRPC 地址 (K8s 内部域名) ---
-PYTHON_ADDR=intelligence-service:50051
-RUST_ADDR=nitro-service:50052
-```
-
----
-
-## 📦 4. 构建与加载镜像 (SOP)
-
-由于 minikube 内部网络环境复杂，我们采用 **“本地构建 -> 物理加载”** 的策略：
-
-### Step 1: 本地构建 (Local Build)
-在普通终端（未挂载 `docker-env`）下运行：
+推荐的本地集群启动参数：
 
 ```powershell
-# 1. 构建编排层 (Go)
+minikube start --cpus=4 --memory=8192
+```
+
+确认集群可用：
+
+```powershell
+kubectl get nodes
+```
+
+## 2. 在本地构建镜像
+
+在仓库根目录执行：
+
+```powershell
 docker build -t ai-gateway-orchestration:latest -f core-go/Dockerfile .
-
-# 2. 构建智能层 (Python - 已优化为 CPU 版，约 500MB)
 docker build -t ai-gateway-intelligence:latest -f logic-python/Dockerfile .
-
-# 3. 构建加速层 (Rust - 使用 1.85+ 镜像支持 Edition 2024)
 docker build -t ai-gateway-nitro:latest -f utils-rust/Dockerfile .
 ```
 
-### Step 2: 加载镜像到 Minikube
-将本地镜像直接推送到 minikube 虚拟机节点：
+## 3. 将镜像加载到 Minikube
 
 ```powershell
 minikube image load ai-gateway-orchestration:latest
@@ -70,91 +40,218 @@ minikube image load ai-gateway-intelligence:latest
 minikube image load ai-gateway-nitro:latest
 ```
 
----
-
-## ☸️ 5. Kubernetes 部署
-
-按照依赖顺序应用资源清单：
+如果需要确认镜像确实进入 Minikube，可以执行：
 
 ```powershell
-# 1. 部署基础配置 (Namespace, Secret, PVC)
+minikube ssh -- docker images
+```
+
+## 4. 准备基础资源
+
+先部署命名空间、密钥和持久卷声明：
+
+```powershell
 kubectl apply -f k8s/base.yaml
+```
 
-# 2. 部署基础设施 (Redis)
+如果你要修改 API Key 或其他默认密钥，建议先编辑 `k8s/base.yaml` 再执行 apply。
+
+## 5. 部署基础设施
+
+部署 Redis：
+
+```powershell
 kubectl apply -f k8s/redis.yaml
+```
 
-# 3. 部署后端微服务 (Rust & Python)
+等待基础设施启动完成：
+
+```powershell
+kubectl get pods -n ai-gateway -w
+```
+
+## 6. 部署 Nitro 和 Intelligence
+
+```powershell
 kubectl apply -f k8s/nitro.yaml
 kubectl apply -f k8s/intelligence.yaml
+```
 
-# 3. 部署入口网关 (Go)
+继续观察 Pod 状态，直到 Rust 和 Python 服务都进入 `Running`：
+
+```powershell
+kubectl get pods -n ai-gateway -w
+```
+
+## 7. 部署 Go 编排层
+
+```powershell
 kubectl apply -f k8s/orchestration.yaml
 ```
 
----
+等待网关 Pod 启动完成：
 
-## 🔍 6. 验证与访问
+```powershell
+kubectl get pods -n ai-gateway -w
+```
 
-1.  **检查 Pod 状态**:
-    ```powershell
-    kubectl get pods -n ai-gateway -w
-    ```
-    *期望所有 Pod 最终显示为 `Running`。*
+## 8. 验证服务与健康状态
 
-2.  **获取访问 URL**:
-    ```powershell
-    minikube service orchestration-service -n ai-gateway --url
-    ```
-    *示例返回: `http://192.168.49.2:30080`*
+查看 Service：
 
-3.  **发送测试请求**:
-    ```bash
-    curl -X POST http://<URL>/v1/chat/completions \
-      -H "Authorization: Bearer sk-gw-default-123456" \
-      -H "Content-Type: application/json" \
-      -d '{"model":"gpt-4o", "messages":[{"role":"user","content":"Hello K8s!"}]}'
-    ```
+```powershell
+kubectl get svc -n ai-gateway
+```
 
----
+获取 Minikube 可访问地址：
 
-## 🛡️ 7. 常见问题排查 (Troubleshooting)
+```powershell
+minikube service orchestration-service -n ai-gateway --url
+```
 
-| 问题现象 | 可能原因 | 解决方法 |
-| :--- | :--- | :--- |
-| `ErrImageNeverPull` | 镜像未成功加载到 minikube | 重新运行 `minikube image load <镜像名>` |
-| Python 层构建极慢 | 正在下载 CUDA 依赖 | 检查 `uv.lock` 是否包含 `nvidia-*`，确保 `pyproject.toml` 包含 `pytorch-cpu` 索引。 |
-| Rust 层构建报错 `edition2024` | 基础镜像版本太低 | 确保 `utils-rust/Dockerfile` 使用 `FROM rust:1.85-slim`。 |
-| Go 报错 `connection refused` | 内部 Service 域名无法解析 | 检查 `k8s/*.yaml` 中的 `Service` 名称是否与 Go 的 `ENV` 配置一致。 |
-| 无法访问外网 OpenAI | minikube 虚拟机没有外网访问权 | 检查 minikube 网络插件或配置 http 代理。 |
+然后发送一个最小测试请求：
 
----
+```bash
+curl -X POST http://<URL>/v1/chat/completions \
+  -H "Authorization: Bearer sk-gw-default-123456" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello Minikube"}]}'
+```
 
-## 🔄 8. 迭代开发与验证 (Iterative Development)
+同时验证健康、就绪和指标接口：
 
-当你修改了代码（增加功能或修复 Bug）并希望在 minikube 中验证时，请根据修改范围选择对应的流程：
+```bash
+curl http://<URL>/healthz
+curl http://<URL>/readyz
+curl http://<URL>/metrics
+```
 
-### 场景 A：修改了业务逻辑 (最常用)
-*修改了 Rust 的正则、Python 的阈值或 Go 的路由算法。*
-1.  **重新构建镜像**: `docker build -t <镜像名>:latest -f <Dockerfile路径> .`
-2.  **重新加载镜像**: `minikube image load <镜像名>:latest`
-3.  **触发滚动更新**: `kubectl rollout restart deployment <Deployment名> -n ai-gateway`
-    *   例如: `kubectl rollout restart deployment nitro -n ai-gateway`
+注意：`/readyz` 现在不再是固定返回 ready，而是会根据必需依赖的健康状态来决定返回结果。
 
-### 场景 B：修改了通信协议 (proto)
-*增加了 gRPC 接口或修改了消息字段。*
-1.  **生成代码**: `make proto`
-2.  **构建并加载所有受影响镜像**: (同场景 A)
-3.  **重启所有服务**: `kubectl rollout restart deployment -n ai-gateway`
+## 9. 接入监控资源
 
-### 场景 C：修改了配置或密钥
-1.  **更新 YAML**: 修改 `k8s/base.yaml` 或 `k8s/orchestration.yaml`。
-2.  **应用配置**: `kubectl apply -f <文件名>`
-3.  **重启服务**: `kubectl rollout restart deployment orchestration -n ai-gateway`
+这一步要求你的集群已经安装 Prometheus Operator 或兼容套件，例如 `kube-prometheus-stack`。
 
-### 💡 高效调试技巧
-- **实时日志**: `kubectl logs -f -l app=<app名> -n ai-gateway`
-- **本地优先**: 在上云前，建议先在本地直接运行各平面（Go/Python/Rust）进行逻辑验证。
+应用监控资源：
 
----
+```powershell
+kubectl apply -f k8s/servicemonitor.yaml
+kubectl apply -f k8s/prometheus-rules.yaml
+```
 
-*AI 网关：高性能、多语言、安全可控。*
+验证资源：
+
+```powershell
+kubectl describe servicemonitor ai-gateway-orchestration -n ai-gateway
+kubectl describe prometheusrule ai-gateway-alerts -n ai-gateway
+```
+
+如需更详细的监控说明，请查看：
+
+- [k8s/MONITORING.md](/D:/workspace/codes4/gateway/k8s/MONITORING.md)
+
+## 10. 本地迭代开发流程
+
+当你修改代码后，推荐使用下面的固定流程：
+
+1. 重新构建受影响镜像
+2. 重新加载到 Minikube
+3. 重启对应 Deployment
+
+### Go 改动
+
+```powershell
+docker build -t ai-gateway-orchestration:latest -f core-go/Dockerfile .
+minikube image load ai-gateway-orchestration:latest
+kubectl rollout restart deployment orchestration -n ai-gateway
+```
+
+### Python 改动
+
+```powershell
+docker build -t ai-gateway-intelligence:latest -f logic-python/Dockerfile .
+minikube image load ai-gateway-intelligence:latest
+kubectl rollout restart deployment intelligence -n ai-gateway
+```
+
+### Rust 改动
+
+```powershell
+docker build -t ai-gateway-nitro:latest -f utils-rust/Dockerfile .
+minikube image load ai-gateway-nitro:latest
+kubectl rollout restart deployment nitro -n ai-gateway
+```
+
+## 11. 常用排查命令
+
+```powershell
+kubectl get all -n ai-gateway
+kubectl logs -f deployment/orchestration -n ai-gateway
+kubectl logs -f deployment/intelligence -n ai-gateway
+kubectl logs -f deployment/nitro -n ai-gateway
+kubectl describe pod <pod-name> -n ai-gateway
+```
+
+## 12. 常见问题
+
+### Minikube 中找不到镜像
+
+重新执行：
+
+```powershell
+minikube image load <image>:latest
+```
+
+### Go 网关无法连接 Python 或 Rust
+
+检查以下文件中的 Service 名称和环境变量是否一致：
+
+- `k8s/orchestration.yaml`
+- `k8s/intelligence.yaml`
+- `k8s/nitro.yaml`
+
+再查看 orchestration 日志：
+
+```powershell
+kubectl logs -f deployment/orchestration -n ai-gateway
+```
+
+### `/readyz` 返回 not ready
+
+先查看返回内容：
+
+```bash
+curl http://<URL>/readyz
+```
+
+然后根据返回的依赖状态去检查对应 Pod 和 Service。
+
+### `ServiceMonitor` 或 `PrometheusRule` 无法识别
+
+通常说明集群中还没有安装 Prometheus Operator。
+
+## 13. 一次性完整部署摘要
+
+如果你想从头到尾完整跑一遍本地部署，可以直接按这个顺序执行：
+
+```powershell
+minikube start --cpus=4 --memory=8192
+
+docker build -t ai-gateway-orchestration:latest -f core-go/Dockerfile .
+docker build -t ai-gateway-intelligence:latest -f logic-python/Dockerfile .
+docker build -t ai-gateway-nitro:latest -f utils-rust/Dockerfile .
+
+minikube image load ai-gateway-orchestration:latest
+minikube image load ai-gateway-intelligence:latest
+minikube image load ai-gateway-nitro:latest
+
+kubectl apply -f k8s/base.yaml
+kubectl apply -f k8s/redis.yaml
+kubectl apply -f k8s/nitro.yaml
+kubectl apply -f k8s/intelligence.yaml
+kubectl apply -f k8s/orchestration.yaml
+
+# 可选：前提是已安装 Prometheus Operator
+kubectl apply -f k8s/servicemonitor.yaml
+kubectl apply -f k8s/prometheus-rules.yaml
+```
