@@ -1,7 +1,7 @@
 package router
 
-// QualityStrategy 直接选择质量评分最高的健康节点。
-// 适用于对响应质量要求极高的场景（如法律、医疗咨询）。
+// QualityStrategy 优先选择质量评分最高的健康节点。
+// 适用于对回答质量更敏感、愿意牺牲一部分成本和延迟的场景。
 type QualityStrategy struct {
 	Tracker *HealthTracker
 }
@@ -13,7 +13,6 @@ func (s *QualityStrategy) Select(ctx *RouteContext, nodes []*ModelNode) *ModelNo
 		return nil
 	}
 
-	// 1. 优先从健康节点中选择质量最高的。
 	var bestHealthy *ModelNode
 	for _, n := range nodes {
 		if !s.Tracker.IsHealthy(n.Name) {
@@ -28,6 +27,5 @@ func (s *QualityStrategy) Select(ctx *RouteContext, nodes []*ModelNode) *ModelNo
 		return bestHealthy
 	}
 
-	// 2. 兜底：所有节点不健康时，仍选质量最高的。
 	return selectByHighestQuality(nodes)
 }

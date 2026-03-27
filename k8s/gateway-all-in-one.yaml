@@ -143,6 +143,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: orchestration
+  labels:
+    app: orchestration
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/component: orchestration
 spec:
   replicas: 1
   selector:
@@ -174,10 +178,15 @@ apiVersion: v1
 kind: Service
 metadata:
   name: orchestration
+  labels:
+    app: orchestration
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/component: orchestration
 spec:
   type: LoadBalancer # 如果要在 Minikube 外访问，使用 NodePort 或 LoadBalancer
   selector:
     app: orchestration
   ports:
-    - port: 8080
+    - name: http
+      port: 8080
       targetPort: 8080

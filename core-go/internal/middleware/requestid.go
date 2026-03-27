@@ -6,14 +6,14 @@ import (
 )
 
 const (
-	// RequestIDKey is the key used to store the Request-ID in the gin.Context.
+	// RequestIDKey 是在 gin.Context 中存放请求 ID 的键名。
 	RequestIDKey = "request_id"
-	// HeaderXRequestID is the standard header for request tracking.
+	// HeaderXRequestID 是网关统一使用的请求追踪头。
 	HeaderXRequestID = "X-Request-ID"
 )
 
-// RequestID 中间件确保每个请求都拥有唯一的标识 ID。
-// 它会检查请求头中的 X-Request-ID，若不存在则生成一个新的 UUID。
+// RequestID 确保每个请求都拥有唯一的追踪标识。
+// 如果上游已经传入 X-Request-ID，则沿用；否则由网关生成新的 UUID。
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rid := c.GetHeader(HeaderXRequestID)
@@ -21,10 +21,10 @@ func RequestID() gin.HandlerFunc {
 			rid = uuid.New().String()
 		}
 
-		// 注入上下文供后续 Handler 使用
+		// 注入上下文供后续 handler、日志和下游调用复用。
 		c.Set(RequestIDKey, rid)
 
-		// 设置响应头
+		// 同步写回响应头，便于客户端和日志系统关联。
 		c.Header(HeaderXRequestID, rid)
 
 		c.Next()

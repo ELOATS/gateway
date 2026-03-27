@@ -1,25 +1,91 @@
-# 多语言 AI 网关 (Polyglot AI Gateway)
+# 多语言 AI 网关
 
-这是一个针对企业级需求设计的高性能、多层次 AI 网关。它集成了多模型路由、分布式限流、安全防护、语义缓存及全链路可观测性。
+这是一个由三层平面组成的 AI 网关系统：
 
-## 🏗 系统架构：三层平面设计
+- Go 编排层
+- Rust Nitro 安全与 Token 工具层
+- Python 智能增强与缓存层
 
-1.  **编排层 (Orchestration - Go):** 系统的唯一入口。负责分布式限流 (Redis)、身份验证、Trace-ID 生成、指标收集及基于 CoW (Copy-on-Write) 的高性能路由调度。
-2.  **加速层 (Nitro - Rust):** 处理计算密集型任务。针对 PII 脱敏和 Token 计数实现了分词器与正则的 **Lazy Load** 零成本抽象。
-3.  **智能层 (Intelligence - Python):** 处理复杂 AI 逻辑。支持语义缓存及 **异步背离持久化** 机制。
+目前系统已经按“第一性原理”收敛了主链路，核心特点是：
 
-## 🚀 运行步骤
-1.  **先决条件:** 确保本地已安装 Redis (默认端口 6379)。
-2.  **一键启动 (推荐):** 在根目录运行 `.\run_all.ps1`。
-3.  **手动启动 Go 编排层:** `cd core-go && go run ./cmd/gateway`。
+- 统一的请求标准化入口
+- 统一的策略决策点
+- 统一的执行计划
+- 显式区分降级与 fail-closed
+- 显式暴露依赖健康状态、版本和失败策略
 
-## 📂 项目结构 (Go 标准布局)
-- **`core-go/`**: 编排层核心。引入 Adapter Factory 模式，支持 OpenTelemetry。
-- **`logic-python/`**: 智能层代码。支持向量索引的异步保存。
-- **`utils-rust/`**: 加速层代码。优化了资源生命周期管理。
-- **`proto/`**: 跨语言 gRPC 定义。
-    - `pkg/models/`: 公共数据模型。
-    - `api/gateway/v1/`: 生成的 gRPC 客户端代码。
-- **`logic-python/`**: 智能层代码。
-- **`utils-rust/`**: 加速层代码。
-- **`proto/`**: 跨语言 gRPC 定义。
+## 目录结构
+
+- `core-go/`
+  Go 编排层，包含 HTTP 入口、策略管线、路由、可观测性、管理接口和控制台
+- `logic-python/`
+  Python 智能层，负责语义缓存和可选增强能力
+- `utils-rust/`
+  Rust Nitro 层，负责同步安全能力和 Token 工具能力
+- `proto/`
+  跨语言 gRPC 协议
+- `k8s/`
+  Kubernetes 部署、监控资源和相关文档
+
+## 当前系统能力
+
+- Chat 请求已经收敛为统一的 Go pipeline，而不是散落在 middleware 和 handler 中
+- 工具鉴权、限流、配额、输入护栏、路由、输出护栏、审计都走统一热路径
+- 运行时依赖状态支持显式暴露：
+  - readiness
+  - health
+  - version
+  - failure mode
+- Prometheus 指标已新增：
+  - `gateway_readiness`
+  - `gateway_dependency_health`
+  - `gateway_dependency_required`
+  - `gateway_degraded_events_total`
+- Kubernetes 监控资源已新增：
+  - `k8s/servicemonitor.yaml`
+  - `k8s/prometheus-rules.yaml`
+
+## 本地开发
+
+常用本地验证命令：
+
+```powershell
+cd core-go
+$env:GOCACHE='D:\workspace\codes4\gateway\.gocache'
+go test ./...
+```
+
+如果要本地直接启动整套服务，可以使用：
+
+```powershell
+.\run_all.ps1
+```
+
+## Kubernetes 与 Minikube
+
+本地 Minikube 分步部署文档：
+
+- [K8S_DEPLOYMENT_GUIDE.md](/D:/workspace/codes4/gateway/K8S_DEPLOYMENT_GUIDE.md)
+
+监控接入说明：
+
+- [MONITORING.md](/D:/workspace/codes4/gateway/k8s/MONITORING.md)
+
+## 监控接入摘要
+
+如果你在 Kubernetes 中使用 Prometheus Operator：
+
+1. 先部署网关工作负载
+2. 再应用 `k8s/servicemonitor.yaml`
+3. 再应用 `k8s/prometheus-rules.yaml`
+4. 最后确认 orchestration service 的 `/metrics` 已被采集
+
+## 验证
+
+当前 Go 编排层改动已通过：
+
+```powershell
+cd core-go
+$env:GOCACHE='D:\workspace\codes4\gateway\.gocache'
+go test ./...
+```

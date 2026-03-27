@@ -8,13 +8,13 @@ import (
 	"github.com/ai-gateway/core/internal/observability"
 )
 
-// CircuitState 定义熔断器的三种状态。
+// CircuitState 描述节点熔断器的运行状态。
 type CircuitState int
 
 const (
-	StateClosed   CircuitState = iota // 正常通信。
-	StateOpen                         // 熔断开启：禁止请求。
-	StateHalfOpen                     // 半开启：尝试恢复。
+	StateClosed   CircuitState = iota // 正常通信
+	StateOpen                         // 熔断打开，暂时拒绝流量
+	StateHalfOpen                     // 半开，允许少量流量验证恢复情况
 )
 
 func (s CircuitState) String() string {
@@ -30,45 +30,42 @@ func (s CircuitState) String() string {
 	}
 }
 
-// NodeHealth 记录单个模型节点的实时运行状态。
+// NodeHealth 记录单个模型节点的实时健康快照。
 type NodeHealth struct {
-	AvgLatency          float64      // EWMA 延迟，单位秒。
-	ErrorRate           float64      // 最近统计周期内的错误率 (0.0~1.0)。
-	LastSuccess         time.Time    // 最后一次成功时间。
-	LastFailure         time.Time    // 最后一次失败时间。
-	TotalRequests       int64        // 累计请求数。
-	TotalErrors         int64        // 累计错误数。
-	State               CircuitState // 熔断器当前状态。
-	ConsecutiveFailures int          // 连续失败次数计数器。
+	AvgLatency          float64
+	ErrorRate           float64
+	LastSuccess         time.Time
+	LastFailure         time.Time
+	TotalRequests       int64
+	TotalErrors         int64
+	State               CircuitState
+	ConsecutiveFailures int
 }
 
-// IsHealthy 综合判定节点是否健康。
+// IsHealthy 根据熔断状态和最近错误率综合判断节点是否健康。
 func (nh *NodeHealth) IsHealthy() bool {
-	// 如果由于故障达到上限熔断，则直接判定不健康。
 	if nh.State == StateOpen {
-		// 检查是否到了尝试恢复的时间（例如 30 秒后进入半开状态）。
+		// 打开状态下只在冷却时间过去后允许进入半开探测。
 		if time.Since(nh.LastFailure) > 30*time.Second {
-			return true // 允许进入半开尝试。
+			return true
 		}
 		return false
 	}
 
-	// 传统判定策略：错误率超过 50% 且不是刚启动，视为不正常。
 	if nh.TotalRequests > 5 && nh.ErrorRate > 0.5 {
 		return false
 	}
-
 	return true
 }
 
-// HealthTracker 维护所有节点的实时健康状态。
+// HealthTracker 维护所有节点的健康状态，并支持 EWMA 延迟和简单熔断逻辑。
 type HealthTracker struct {
 	mu     sync.RWMutex
 	states map[string]*NodeHealth
-	alpha  float64 // EWMA 衰减因子。
+	alpha  float64
 }
 
-// NewHealthTracker 创建一个新的健康追踪器实例。
+// NewHealthTracker 创建健康追踪器。
 func NewHealthTracker(alpha float64) *HealthTracker {
 	if alpha <= 0 || alpha > 1 {
 		alpha = 0.3
@@ -79,7 +76,7 @@ func NewHealthTracker(alpha float64) *HealthTracker {
 	}
 }
 
-// RecordSuccess 记录一次成功的调用。
+// RecordSuccess 记录一次成功调用，并更新延迟、错误率和熔断状态。
 func (ht *HealthTracker) RecordSuccess(node string, latency time.Duration) {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
@@ -87,28 +84,26 @@ func (ht *HealthTracker) RecordSuccess(node string, latency time.Duration) {
 	h := ht.getOrCreate(node)
 	h.TotalRequests++
 	h.LastSuccess = time.Now()
-	h.ConsecutiveFailures = 0 // 重置连续失败计数。
+	h.ConsecutiveFailures = 0
 
-	// 状态转移：如果是熔断或半开状态下的成功，恢复至关闭。
 	if h.State != StateClosed {
-		slog.Info("熔断状态重置为闭合", "node", node, "prev_state", h.State.String())
 		oldState := h.State.String()
 		h.State = StateClosed
+		slog.Info("节点熔断状态恢复为 Closed", "node", node, "prev_state", oldState)
 		observability.CircuitBreakerChanges.WithLabelValues(node, oldState+"->Closed").Inc()
 	}
 
-	// EWMA 更新延迟
-	lat := latency.Seconds()
+	latencySeconds := latency.Seconds()
 	if h.AvgLatency == 0 {
-		h.AvgLatency = lat
+		h.AvgLatency = latencySeconds
 	} else {
-		h.AvgLatency = ht.alpha*lat + (1-ht.alpha)*h.AvgLatency
+		h.AvgLatency = ht.alpha*latencySeconds + (1-ht.alpha)*h.AvgLatency
 	}
 
 	h.ErrorRate = float64(h.TotalErrors) / float64(h.TotalRequests)
 }
 
-// RecordFailure 记录一次失败的调用。
+// RecordFailure 记录一次失败调用，并在连续失败达到阈值后打开熔断器。
 func (ht *HealthTracker) RecordFailure(node string) {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
@@ -119,22 +114,20 @@ func (ht *HealthTracker) RecordFailure(node string) {
 	h.LastFailure = time.Now()
 	h.ConsecutiveFailures++
 
-	// 熔断逻辑：连续失败 5 次，则打开熔断器。
 	if h.State == StateClosed && h.ConsecutiveFailures >= 5 {
-		slog.Warn("连续失败达到阈值，熔断器打开", "node", node)
 		h.State = StateOpen
+		slog.Warn("连续失败达到阈值，打开熔断器", "node", node)
 		observability.CircuitBreakerChanges.WithLabelValues(node, "Closed->Open").Inc()
 	} else if h.State == StateHalfOpen {
-		// 半开状态下的任何失败都立刻回到开启状态
-		slog.Warn("半开状态调用失败，重新熔断", "node", node)
 		h.State = StateOpen
+		slog.Warn("半开状态探测失败，重新打开熔断器", "node", node)
 		observability.CircuitBreakerChanges.WithLabelValues(node, "HalfOpen->Open").Inc()
 	}
 
 	h.ErrorRate = float64(h.TotalErrors) / float64(h.TotalRequests)
 }
 
-// GetHealth 获取指定节点的健康快照。
+// GetHealth 返回指定节点的健康快照。
 func (ht *HealthTracker) GetHealth(node string) NodeHealth {
 	ht.mu.RLock()
 	defer ht.mu.RUnlock()
@@ -145,7 +138,7 @@ func (ht *HealthTracker) GetHealth(node string) NodeHealth {
 	return NodeHealth{}
 }
 
-// IsHealthy 判定指定节点是否健康。
+// IsHealthy 判断指定节点当前是否健康。
 func (ht *HealthTracker) IsHealthy(node string) bool {
 	ht.mu.RLock()
 	defer ht.mu.RUnlock()
@@ -157,7 +150,7 @@ func (ht *HealthTracker) IsHealthy(node string) bool {
 	return h.IsHealthy()
 }
 
-// getOrCreate 获取或创建节点的健康记录（调用方需持有写锁）。
+// getOrCreate 在调用方持有写锁的前提下获取或初始化节点状态。
 func (ht *HealthTracker) getOrCreate(node string) *NodeHealth {
 	h, ok := ht.states[node]
 	if !ok {

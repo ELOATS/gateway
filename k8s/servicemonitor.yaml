@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ai-gateway-orchestration
+  namespace: ai-gateway
+  labels:
+    app: ai-gateway
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/component: orchestration
+spec:
+  namespaceSelector:
+    matchNames:
+      - ai-gateway
+  selector:
+    matchLabels:
+      app: orchestration
+      app.kubernetes.io/name: ai-gateway
+      app.kubernetes.io/component: orchestration
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

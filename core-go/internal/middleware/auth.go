@@ -1,4 +1,4 @@
-// Package middleware provides Gin middleware for security and cross-cutting concerns.
+// Package middleware 提供网关的通用安全与横切中间件。
 package middleware
 
 import (
@@ -11,8 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AuthRequired 验证请求头中的 API Key 是否正确。
-// 支持多 Key 匹配，并使用时序安全比较防止计时攻击。
+// AuthRequired 校验请求头中的 API Key 是否有效。
+// 它支持多 Key 配置，并使用常量时间比较降低时序攻击风险。
 func AuthRequired(keys []config.APIKeyEntry) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rid, _ := c.Get(RequestIDKey)
@@ -44,7 +44,7 @@ func AuthRequired(keys []config.APIKeyEntry) gin.HandlerFunc {
 		providedKey := parts[1]
 		var matchedKey *config.APIKeyEntry
 
-		// 时序安全遍历比较
+		// 使用常量时间比较遍历匹配，避免泄露哪一位开始不同。
 		for _, entry := range keys {
 			if subtle.ConstantTimeCompare([]byte(providedKey), []byte(entry.Key)) == 1 {
 				matchedKey = &entry
@@ -63,7 +63,7 @@ func AuthRequired(keys []config.APIKeyEntry) gin.HandlerFunc {
 			return
 		}
 
-		// 注入 Key 信息，供后续中间件（如限流、配额管理）使用
+		// 把租户信息注入上下文，供限流、配额和审计复用。
 		c.Set("key_label", matchedKey.Label)
 		c.Set("api_key", matchedKey.Key)
 		observability.AuthTotal.WithLabelValues("success", "").Inc()

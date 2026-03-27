@@ -1,0 +1,56 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-gateway-alerts
+  namespace: ai-gateway
+  labels:
+    app: ai-gateway
+spec:
+  groups:
+    - name: ai-gateway-readiness
+      rules:
+        - alert: AIGatewayNotReady
+          expr: gateway_readiness == 0
+          for: 2m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: AI Gateway is not ready
+            description: Required dependencies are unhealthy and the gateway has reported not-ready for more than 2 minutes.
+            runbook_url: https://example.internal/runbooks/ai-gateway-not-ready
+
+        - alert: AIGatewayRequiredDependencyDown
+          expr: gateway_dependency_required == 1 and on (dependency) gateway_dependency_health == 0
+          for: 2m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: Required AI Gateway dependency is down
+            description: Dependency {{ $labels.dependency }} is marked required but unhealthy for more than 2 minutes.
+            runbook_url: https://example.internal/runbooks/ai-gateway-required-dependency-down
+
+    - name: ai-gateway-degradation
+      rules:
+        - alert: AIGatewayOptionalDependencyDegraded
+          expr: gateway_dependency_required == 0 and on (dependency) gateway_dependency_health == 0
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: Optional AI Gateway dependency degraded
+            description: Optional dependency {{ $labels.dependency }} has been unhealthy for more than 15 minutes.
+            runbook_url: https://example.internal/runbooks/ai-gateway-optional-dependency-degraded
+
+        - alert: AIGatewayDegradedAuditSpike
+          expr: increase(gateway_degraded_events_total[10m]) > 20
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: AI Gateway degraded events are spiking
+            description: The gateway emitted more than 20 degraded or fail-open-with-audit events in the last 10 minutes.
+            runbook_url: https://example.internal/runbooks/ai-gateway-degraded-traffic

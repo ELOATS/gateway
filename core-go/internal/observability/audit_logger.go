@@ -13,6 +13,10 @@ import (
 type AuditRecord struct {
 	Timestamp time.Time `json:"timestamp"`
 	RequestID string    `json:"request_id"`
+	Event     string    `json:"event,omitempty"`
+	Status    string    `json:"status,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	Degraded  bool      `json:"degraded,omitempty"`
 	APIKey    string    `json:"api_key,omitempty"` // 掩码后的 Key 或 User ID
 	Model     string    `json:"model"`
 	Node      string    `json:"node"`

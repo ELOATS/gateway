@@ -11,7 +11,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-func buildGRPCTransportCredentials(cfg *config.Config) (credentials.TransportCredentials, error) {
+// BuildGRPCTransportCredentials 构建 gRPC 传输层凭证。
+func BuildGRPCTransportCredentials(cfg *config.Config) (credentials.TransportCredentials, error) {
 	if !cfg.GRPCEnableTLS {
 		return insecure.NewCredentials(), nil
 	}

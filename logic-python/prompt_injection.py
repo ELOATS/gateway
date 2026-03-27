@@ -8,12 +8,19 @@ from typing import Callable, Iterable, Optional
 
 @dataclass(frozen=True)
 class DetectionResult:
+    """Prompt Injection 检测的标准化返回结构。"""
+
     safe: bool
     reason: str = ""
     score: float = 0.0
 
 
 class PromptInjectionDetector:
+    """轻量 Prompt Injection 检测器。
+
+    先做规则和关键词拦截，再在有 embedding 能力时补一层语义相似度判断。
+    """
+
     def __init__(
         self,
         embed_fn: Optional[Callable[[list[str]], list[Iterable[float]]]] = None,
@@ -41,6 +48,7 @@ class PromptInjectionDetector:
         self._prototype_vectors = self._embed_fn(self._prototypes) if self._embed_fn else None
 
     def inspect(self, prompt: str) -> DetectionResult:
+        """对输入提示词做分层检测，返回是否安全及触发原因。"""
         normalized = " ".join(prompt.lower().split())
         if not normalized:
             return DetectionResult(safe=True)
@@ -49,7 +57,7 @@ class PromptInjectionDetector:
             if rule.search(normalized):
                 return DetectionResult(
                     safe=False,
-                    reason="安全拦截: 检测到潜在的 Prompt Injection 攻击。",
+                    reason="安全拦截：检测到潜在的 Prompt Injection 攻击。",
                     score=1.0,
                 )
 
@@ -61,7 +69,7 @@ class PromptInjectionDetector:
         if keyword_hits >= 2:
             return DetectionResult(
                 safe=False,
-                reason="安全拦截: 检测到潜在的 Prompt Injection 攻击。",
+                reason="安全拦截：检测到潜在的 Prompt Injection 攻击。",
                 score=0.9,
             )
 
@@ -74,7 +82,7 @@ class PromptInjectionDetector:
             if score >= self._similarity_threshold:
                 return DetectionResult(
                     safe=False,
-                    reason="安全拦截: 检测到潜在的 Prompt Injection 攻击。",
+                    reason="安全拦截：检测到潜在的 Prompt Injection 攻击。",
                     score=score,
                 )
 
@@ -82,6 +90,7 @@ class PromptInjectionDetector:
 
     @staticmethod
     def _cosine_similarity(left: Iterable[float], right: Iterable[float]) -> float:
+        """计算两组向量的余弦相似度，供语义原型匹配使用。"""
         dot = 0.0
         left_norm = 0.0
         right_norm = 0.0

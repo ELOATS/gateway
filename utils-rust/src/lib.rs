@@ -1,4 +1,4 @@
-//! Nitro Rust core for in-process masking and token counting.
+//! Nitro Rust 核心能力，提供进程内脱敏和 Token 统计能力。
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -19,8 +19,10 @@ pub struct CompiledRule {
     pub replacement: String,
 }
 
+// 全局规则表由 Go/Python 侧注入，运行时只做只读匹配。
 pub static SENSITIVE_RULES: Lazy<RwLock<Vec<CompiledRule>>> = Lazy::new(|| RwLock::new(vec![]));
 
+// 三套 BPE 编码器在进程内懒加载，避免每次统计 Token 都重新初始化。
 pub static BPE_CL100K: Lazy<CoreBPE> =
     Lazy::new(|| cl100k_base().expect("failed to initialize cl100k_base"));
 pub static BPE_P50K: Lazy<CoreBPE> =
@@ -35,7 +37,7 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
 }
 
 /// # Safety
-/// `ptr` must come from `malloc` with the same `size`, and it must not have been freed already.
+/// `ptr` 必须来自上面的 `malloc`，并且 `size` 必须与分配时保持一致。
 #[no_mangle]
 pub unsafe extern "C" fn free_ptr(ptr: *mut u8, size: usize) {
     if ptr.is_null() {
@@ -46,7 +48,7 @@ pub unsafe extern "C" fn free_ptr(ptr: *mut u8, size: usize) {
 }
 
 /// # Safety
-/// `rules_ptr` must be a valid, non-null, NUL-terminated UTF-8 string pointer.
+/// `rules_ptr` 必须是有效的、非空的、以 NUL 结尾的 UTF-8 字符串指针。
 #[no_mangle]
 pub unsafe extern "C" fn set_sensitive_rules_wasm(rules_ptr: *const c_char) {
     let rules_str = unsafe { CStr::from_ptr(rules_ptr).to_string_lossy() };
@@ -66,7 +68,7 @@ pub unsafe extern "C" fn set_sensitive_rules_wasm(rules_ptr: *const c_char) {
 }
 
 /// # Safety
-/// `model_ptr` and `text_ptr` must be valid, non-null, NUL-terminated UTF-8 string pointers.
+/// `model_ptr` 和 `text_ptr` 必须是有效的、非空的、以 NUL 结尾的 UTF-8 字符串指针。
 #[no_mangle]
 pub unsafe extern "C" fn count_tokens_wasm(
     model_ptr: *const c_char,
@@ -85,7 +87,7 @@ pub unsafe extern "C" fn count_tokens_wasm(
 }
 
 /// # Safety
-/// `prompt_ptr` must be a valid, non-null, NUL-terminated UTF-8 string pointer.
+/// `prompt_ptr` 必须是有效的、非空的、以 NUL 结尾的 UTF-8 字符串指针。
 #[no_mangle]
 pub unsafe extern "C" fn check_input_wasm(prompt_ptr: *const c_char) -> *mut c_char {
     let prompt = unsafe { CStr::from_ptr(prompt_ptr).to_string_lossy() };
@@ -105,7 +107,7 @@ pub unsafe extern "C" fn check_input_wasm(prompt_ptr: *const c_char) -> *mut c_c
 }
 
 /// # Safety
-/// `ptr` must be a pointer previously returned by `check_input_wasm` and not yet freed.
+/// `ptr` 必须来自 `check_input_wasm`，且只能释放一次。
 #[no_mangle]
 pub unsafe extern "C" fn free_string(ptr: *mut c_char) {
     if ptr.is_null() {
@@ -118,6 +120,7 @@ pub unsafe extern "C" fn free_string(ptr: *mut c_char) {
 
 #[cfg(feature = "service")]
 pub mod service_impl {
+    // 这里保留未来独立 Nitro 服务实现的入口。
     pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
