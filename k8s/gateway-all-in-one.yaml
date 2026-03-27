@@ -84,7 +84,7 @@ spec:
       containers:
         - name: python-logic
           # ❗️注意：这里的 Tag (:latest) 会被 GitHub Actions 自动替换
-          image: ghcr.io/eloats/gateway-python:1db0eb874b013b9d8432e97f88f3d63641f98a8d
+          image: ghcr.io/eloats/gateway-python:a1ffef5c86cfb4007506b5027afca85c206f92b6
           ports:
             - containerPort: 50051
           env:
@@ -120,7 +120,7 @@ spec:
       containers:
         - name: rust-nitro
           # ❗️注意：这里的 Tag (:latest) 会被 GitHub Actions 自动替换
-          image: ghcr.io/eloats/gateway-rust:1db0eb874b013b9d8432e97f88f3d63641f98a8d
+          image: ghcr.io/eloats/gateway-rust:a1ffef5c86cfb4007506b5027afca85c206f92b6
           ports:
             - containerPort: 50052
           env:
@@ -160,7 +160,7 @@ spec:
       containers:
         - name: go-gateway
           # ❗️注意：这里的 Tag (:latest) 会被 GitHub Actions 自动替换
-          image: ghcr.io/eloats/gateway-go:1db0eb874b013b9d8432e97f88f3d63641f98a8d
+          image: ghcr.io/eloats/gateway-go:a1ffef5c86cfb4007506b5027afca85c206f92b6
           ports:
             - containerPort: 8080
           env:
