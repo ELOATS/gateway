@@ -1,0 +1,24 @@
+# 策略链配置：按顺序执行，Evaluate 遇到第一个 Deny 即终止。
+# 此配置文件由 internal/pipeline/engine.go 加载。
+
+policies:
+  - name: tool_auth
+    enabled: true
+    config: {}
+
+  - name: rate_limit
+    enabled: true
+    config:
+      # 目前逻辑仍主要引用 main config 中的 RateLimitQPS/Burst。
+      # 后续迭代可在此处支持针对不同层级的个性化限流配置。
+      backend: redis
+
+  - name: quota
+    enabled: true
+    config: {}
+
+  - name: input_guard
+    enabled: true
+    config:
+      # 具体超时与 FailureMode 目前仍引用自核心配置。
+      backend: nitro_plus_python

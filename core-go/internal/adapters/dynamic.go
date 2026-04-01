@@ -25,78 +25,80 @@ type PluginConfig struct {
 	} `yaml:"request_mapping"`
 }
 
-// DynamicAdapter 是基于 PluginConfig 构造出来的 provider 适配器实例。
-type DynamicAdapter struct {
+// DynamicProtocol 实现了通过 YAML 配置定义的动态转换逻辑。
+type DynamicProtocol struct {
 	Plugin PluginConfig
-	APIKey string
-	Client *http.Client
 }
 
-// NewDynamicAdapter 根据插件配置创建动态适配器。
-func NewDynamicAdapter(p PluginConfig, apiKey string, timeout time.Duration) *DynamicAdapter {
-	return &DynamicAdapter{
-		Plugin: p,
-		APIKey: apiKey,
-		Client: &http.Client{Timeout: timeout},
-	}
-}
-
-func (a *DynamicAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
-	// 先把标准 OpenAI 结构转成 map，再叠加插件要求的额外字段。
-	reqData, _ := json.Marshal(req)
-	var bodyMap map[string]any
-	json.Unmarshal(reqData, &bodyMap)
-
-	for k, v := range a.Plugin.RequestMapping.BodyExtra {
-		bodyMap[k] = v
-	}
-
-	finalData, _ := json.Marshal(bodyMap)
-
-	httpReq, err := http.NewRequest("POST", a.Plugin.BaseURL, bytes.NewBuffer(finalData))
-	if err != nil {
-		return nil, err
-	}
-
+func (p *DynamicProtocol) AuthHeaders(apiKey string) http.Header {
+	headers := make(http.Header)
 	// 允许插件通过模板渲染动态 Header，例如 Authorization: Bearer {{.Key}}。
-	for k, tplStr := range a.Plugin.RequestMapping.HeaderTemplate {
+	for k, tplStr := range p.Plugin.RequestMapping.HeaderTemplate {
 		tmpl, err := template.New(k).Parse(tplStr)
 		if err == nil {
 			var b bytes.Buffer
-			tmpl.Execute(&b, map[string]string{"Key": a.APIKey})
-			httpReq.Header.Set(k, b.String())
+			tmpl.Execute(&b, map[string]string{"Key": apiKey})
+			headers.Set(k, b.String())
 		}
 	}
-
-	// 若插件未显式覆盖，则补齐默认 Header。
-	for k, v := range a.Plugin.DefaultHeaders {
-		if httpReq.Header.Get(k) == "" {
-			httpReq.Header.Set(k, v)
+	// 补齐默认 Header。
+	for k, v := range p.Plugin.DefaultHeaders {
+		if headers.Get(k) == "" {
+			headers.Set(k, v)
 		}
 	}
+	return headers
+}
 
-	resp, err := a.Client.Do(httpReq)
+func (p *DynamicProtocol) EncodeRequest(req *models.ChatCompletionRequest) ([]byte, http.Header, error) {
+	// 先把标准 OpenAI 结构转成 map，再叠加插件要求的额外字段。
+	reqData, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	var bodyMap map[string]any
+	json.Unmarshal(reqData, &bodyMap)
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("plugin %s error (%d): %s", a.Plugin.Name, resp.StatusCode, body)
+	for k, v := range p.Plugin.RequestMapping.BodyExtra {
+		bodyMap[k] = v
+	}
+
+	finalData, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	if req.Stream {
+		headers.Set("Accept", "text/event-stream")
+	} else {
+		headers.Set("Accept", "application/json")
+	}
+
+	return finalData, headers, nil
+}
+
+func (p *DynamicProtocol) DecodeResponse(body io.Reader, statusCode int) (*models.ChatCompletionResponse, error) {
+	if statusCode != http.StatusOK {
+		b, _ := io.ReadAll(body)
+		return nil, fmt.Errorf("dynamic plugin error (%d): %s", statusCode, string(b))
 	}
 
 	// 当前优先按通用 OpenAI 响应结构解码，后续可扩展 ResponseMapping。
 	var result models.ChatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(body).Decode(&result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func (a *DynamicAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
-	// 动态插件的流式协议还未统一，因此先显式返回“不支持”，避免假装兼容。
-	errCh := make(chan error, 1)
-	errCh <- fmt.Errorf("dynamic plugin %s does not support streaming yet", a.Plugin.Name)
-	return nil, errCh
+func (p *DynamicProtocol) DecodeStreamChunk(line string) (*models.ChatCompletionStreamResponse, bool, error) {
+	// 动态插件的流式协议还未统一，暂不提供默认实现。
+	return nil, false, fmt.Errorf("dynamic plugin does not support streaming yet")
+}
+
+// NewDynamicAdapter 根据插件配置创建动态适配器，内部封装为 ProtocolAdapter。
+func NewDynamicAdapter(p PluginConfig, apiKey string, timeout time.Duration) Provider {
+	return NewProtocolAdapter(&DynamicProtocol{Plugin: p}, apiKey, p.BaseURL, timeout)
 }
