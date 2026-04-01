@@ -65,14 +65,39 @@ type HealthTracker struct {
 	alpha  float64
 }
 
-// NewHealthTracker 创建健康追踪器。
+// NewHealthTracker 创建健康追踪器并开启自愈背景协程。
 func NewHealthTracker(alpha float64) *HealthTracker {
 	if alpha <= 0 || alpha > 1 {
 		alpha = 0.3
 	}
-	return &HealthTracker{
+	ht := &HealthTracker{
 		states: make(map[string]*NodeHealth),
 		alpha:  alpha,
+	}
+	go ht.proactiveSelfHealing()
+	return ht
+}
+
+// proactiveSelfHealing 定期扫描熔断节点并尝试恢复。
+func (ht *HealthTracker) proactiveSelfHealing() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ht.mu.Lock()
+		for node, h := range ht.states {
+			if h.State == StateOpen {
+				// 达到冷却时间后，自动进入半开状态进行探测
+				if time.Since(h.LastFailure) > 30*time.Second {
+					oldState := h.State.String()
+					h.State = StateHalfOpen
+					h.ConsecutiveFailures = 0 // 重置计数，给一次机会
+					slog.Info("节点进入半开探测状态", "node", node, "prev_state", oldState)
+					observability.CircuitBreakerChanges.WithLabelValues(node, oldState+"->HalfOpen").Inc()
+				}
+			}
+		}
+		ht.mu.Unlock()
 	}
 }
 

@@ -3,17 +3,17 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	pb "github.com/ai-gateway/core/api/gateway/v1"
+	"github.com/ai-gateway/core/internal/cache"
 	"github.com/ai-gateway/core/internal/config"
 	"github.com/ai-gateway/core/internal/middleware"
 	"github.com/ai-gateway/core/internal/nitro"
@@ -22,7 +22,6 @@ import (
 	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/time/rate"
 )
 
 const (
@@ -48,6 +47,7 @@ type RequestEnvelope struct {
 	RequestID string
 	APIKey    string
 	KeyLabel  string
+	SessionID string
 	Model     string
 	Prompt    string
 	Start     time.Time
@@ -88,37 +88,54 @@ type ExecutionResult struct {
 	DegradeReason string
 }
 
-type localLimiter struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
-
 // ChatPipeline 将“规范化 -> 策略 -> 规划 -> 执行 -> 审计”收敛到一个协调器中。
 // Gin handler 只负责驱动它，不再自己承载零散的业务判断。
 type ChatPipeline struct {
+	policyEngine       *PolicyEngine
 	intelligenceClient pb.AiLogicClient
 	nitroClient        nitro.NitroClient
 	router             *router.SmartRouter
 	config             *config.Config
 	rdb                *redis.Client
+	contextStore       *cache.ContextStore
 
-	mu            sync.Mutex
-	localLimiters map[string]*localLimiter
-	now           func() time.Time
+	now func() time.Time
 }
 
-// NewChatPipeline 初始化统一请求管线，并启动本地限流器的过期清理协程。
+// NewChatPipeline 初始化统一请求管线，并根据配置文件初始化策略引擎。
 func NewChatPipeline(ic pb.AiLogicClient, nc nitro.NitroClient, sr *router.SmartRouter, rdb *redis.Client, cfg *config.Config) *ChatPipeline {
+	// 确保所有内置策略已注册
+	RegisterPolicies()
+
+	deps := &DependencyContainer{
+		IntelligenceClient: ic,
+		NitroClient:        nc,
+		RedisClient:        rdb,
+		Config:             cfg,
+	}
+
+	// 加载策略引擎。默认尝试加载 configs/policies.yaml。
+	// 通过环境变量支持自定义路径，便于在测试或不同环境下灵活配置。
+	policyPath := os.Getenv("GATEWAY_POLICIES_PATH")
+	if policyPath == "" {
+		policyPath = "configs/policies.yaml"
+	}
+
+	engine, err := NewPolicyEngine(policyPath, deps)
+	if err != nil {
+		slog.Error("failed to load policy engine, requests may be blocked", "path", policyPath, "error", err)
+	}
+
 	p := &ChatPipeline{
+		policyEngine:       engine,
 		intelligenceClient: ic,
 		nitroClient:        nc,
 		router:             sr,
 		config:             cfg,
 		rdb:                rdb,
-		localLimiters:      make(map[string]*localLimiter),
+		contextStore:       cache.NewContextStore(rdb, 24*time.Hour),
 		now:                time.Now,
 	}
-	go p.cleanupLocalLimiters()
 	return p
 }
 
@@ -138,6 +155,7 @@ func (p *ChatPipeline) Normalize(c *gin.Context, start time.Time) (*RequestEnvel
 		RequestID: c.GetString(middleware.RequestIDKey),
 		APIKey:    c.GetString("api_key"),
 		KeyLabel:  c.GetString("key_label"),
+		SessionID: c.GetHeader("X-Session-ID"),
 		Model:     req.Model,
 		Prompt:    extractPrompt(&req),
 		Start:     start,
@@ -149,38 +167,42 @@ func (p *ChatPipeline) Normalize(c *gin.Context, start time.Time) (*RequestEnvel
 	return env, nil
 }
 
-// EvaluatePolicies 按固定顺序执行工具授权、限流、配额和输入护栏。
+// EvaluatePolicies 按配置中的顺序执行策略链。
 // 这一步是进入上游执行前唯一允许做“是否放行”判断的地方。
 func (p *ChatPipeline) EvaluatePolicies(c *gin.Context, ctx context.Context, env *RequestEnvelope) *PolicyDecision {
-	if decision := p.authorizeTools(env); decision != nil {
-		return decision
+	if p.policyEngine == nil {
+		return &PolicyDecision{
+			StatusCode: http.StatusServiceUnavailable,
+			ErrorCode:  "engine_unavailable",
+			Message:    "Policy engine is not initialized",
+			Reason:     "initialization failure",
+		}
 	}
-	if decision := p.admitRateLimit(ctx, env); decision != nil {
-		return decision
-	}
-	if decision := p.admitQuota(ctx, env); decision != nil {
+
+	decision := p.policyEngine.Evaluate(ctx, env)
+	if !decision.Allow {
 		return decision
 	}
 
-	sanitizedPrompt, decision := p.guardInput(ctx, env)
-	if decision != nil && !decision.Allow {
-		return decision
-	}
+	// 如果放行，应用可能已经被清洗过的 Prompt
+	replaceLastMessage(env.Request, decision.SanitizedPrompt)
 
-	env.Prompt = sanitizedPrompt
-	replaceLastMessage(env.Request, sanitizedPrompt)
-	if decision == nil {
-		decision = &PolicyDecision{}
-	}
-	decision.Allow = true
-	decision.SanitizedPrompt = sanitizedPrompt
 	return decision
 }
 
 // BuildPlan 在策略阶段通过后生成执行计划。
-// 非流式请求会先尝试缓存命中；否则根据路由器得到一个明确的执行目标。
 func (p *ChatPipeline) BuildPlan(ctx context.Context, c *gin.Context, env *RequestEnvelope) (*ExecutionPlan, *PolicyDecision) {
 	p.asyncCountTokens(env.RequestID, env.Prompt, env.Model)
+
+	// 如果携带 SessionID，自动注入历史上下文
+	if env.SessionID != "" && p.contextStore != nil {
+		history, err := p.contextStore.Retrieve(ctx, env.SessionID)
+		if err == nil && len(history) > 0 {
+			// 在当前请求的消息列表前，插入历史记录
+			env.Request.Messages = append(history, env.Request.Messages...)
+			slog.Debug("session context injected", "session_id", env.SessionID, "history_len", len(history))
+		}
+	}
 
 	if !env.Request.Stream {
 		if cached, degraded, degradeReason, hardFailure := p.checkCache(ctx, env); cached != nil {
@@ -426,6 +448,18 @@ func (p *ChatPipeline) RecordExecutionStarted(env *RequestEnvelope, nodeName str
 
 func (p *ChatPipeline) RecordExecutionCompleted(env *RequestEnvelope, nodeName string, responseText string, tokens int, degraded bool, degradeReason string, status string) {
 	p.logAudit(env, nodeNamePtr(nodeName), EventCompleted, status, "", responseText, degraded, degradeReason, tokens)
+
+	// 异步更新 Session 记忆
+	if env.SessionID != "" && p.contextStore != nil && status == "200" && responseText != "" {
+		go func() {
+			// 仅保存当前回合：最后一条 User 消息 + 刚生成的 Assistant 回复
+			currentRound := []models.Message{
+				{Role: "user", Content: env.Prompt},
+				{Role: "assistant", Content: responseText},
+			}
+			p.contextStore.Append(context.Background(), env.SessionID, currentRound)
+		}()
+	}
 }
 
 func (p *ChatPipeline) RecordStreamBlocked(env *RequestEnvelope, nodeName string, responseText string, reason string, degraded bool, degradeReason string, tokens int) {
@@ -437,182 +471,31 @@ func (p *ChatPipeline) RecordDegraded(env *RequestEnvelope, nodeName string, rea
 	p.logAudit(env, nodeNamePtr(nodeName), EventDegraded, "accepted", reason, "", true, reason, 0)
 }
 
-func (p *ChatPipeline) authorizeTools(env *RequestEnvelope) *PolicyDecision {
-	if len(env.Request.Tools) == 0 && env.Request.ToolChoice == nil {
-		return nil
-	}
-	if env.KeyLabel == "admin" || env.KeyLabel == "premium" {
-		return nil
-	}
-	return &PolicyDecision{
-		StatusCode: http.StatusForbidden,
-		ErrorCode:  "tool_call_forbidden",
-		Message:    "The active API Key tier does not have permission to utilize Agentic tools or function calling.",
-		Reason:     "tool usage requires admin or premium tier",
-	}
-}
 
-func (p *ChatPipeline) admitRateLimit(ctx context.Context, env *RequestEnvelope) *PolicyDecision {
-	if p.config.RateLimitQPS <= 0 || p.config.RateLimitBurst <= 0 {
-		return nil
+
+func (p *ChatPipeline) GuardOutputAsync(rid string, env *RequestEnvelope, nodeName string, fullText string) {
+	if p.intelligenceClient == nil || fullText == "" {
+		return
 	}
 
-	label := env.KeyLabel
-	if label == "" {
-		label = "anonymous"
-	}
+	// 异步执行输出护栏，不阻塞请求路径。
+	// 主要用于审计合规和事后风险分析。
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), p.config.GuardrailIntellTimeout)
+		defer cancel()
 
-	if p.rdb != nil {
-		allowed, err := checkRedisRateLimit(ctx, p.rdb, label, p.config.RateLimitQPS, p.config.RateLimitBurst)
-		if err == nil {
-			if !allowed {
-				observability.RateLimitedTotal.WithLabelValues(label).Inc()
-				return &PolicyDecision{
-					StatusCode: http.StatusTooManyRequests,
-					ErrorCode:  "rate_limit_exceeded",
-					Message:    "请求过于频繁，请稍后再试。",
-					Reason:     "distributed rate limit exceeded",
-					RetryAfter: retryAfterSeconds(p.config.RateLimitQPS),
-				}
-			}
-			return nil
-		}
-		slog.Warn("distributed rate limit degraded to local limiter", "request_id", env.RequestID, "error", err)
-	}
-
-	p.mu.Lock()
-	le, ok := p.localLimiters[label]
-	if !ok {
-		le = &localLimiter{limiter: rate.NewLimiter(rate.Limit(p.config.RateLimitQPS), p.config.RateLimitBurst)}
-		p.localLimiters[label] = le
-	}
-	le.lastSeen = p.now()
-	allow := le.limiter.Allow()
-	p.mu.Unlock()
-
-	if !allow {
-		observability.RateLimitedTotal.WithLabelValues(label).Inc()
-		return &PolicyDecision{
-			StatusCode: http.StatusTooManyRequests,
-			ErrorCode:  "rate_limit_exceeded",
-			Message:    "请求过于频繁，请稍后再试。",
-			Reason:     "local rate limit exceeded",
-			RetryAfter: retryAfterSeconds(p.config.RateLimitQPS),
-		}
-	}
-	return nil
-}
-
-func (p *ChatPipeline) admitQuota(ctx context.Context, env *RequestEnvelope) *PolicyDecision {
-	if env.APIKey == "" || p.rdb == nil {
-		return nil
-	}
-
-	var limit int64
-	for _, entry := range p.config.APIKeys {
-		if entry.Key == env.APIKey {
-			limit = entry.DailyQuota
-			break
-		}
-	}
-	if limit <= 0 {
-		return nil
-	}
-
-	redisKey := fmt.Sprintf("quota:usage:%s", env.APIKey)
-	usageStr, err := p.rdb.Get(ctx, redisKey).Result()
-	if errors.Is(err, redis.Nil) {
-		usageStr = "0"
-	} else if err != nil {
-		slog.Warn("quota check degraded", "request_id", env.RequestID, "error", err)
-		return nil
-	}
-
-	usage, _ := strconv.ParseInt(usageStr, 10, 64)
-	if usage < limit {
-		return nil
-	}
-
-	ttl, _ := p.rdb.TTL(ctx, redisKey).Result()
-	if ttl < 0 {
-		ttl = 24 * time.Hour
-	}
-
-	return &PolicyDecision{
-		StatusCode: http.StatusTooManyRequests,
-		ErrorCode:  "quota_exceeded",
-		Message:    fmt.Sprintf("您的配额已耗尽 (%d/%d Tokens)。将在 %d 小时 %d 分钟后重置。", usage, limit, int(ttl.Hours()), int(ttl.Minutes())%60),
-		Reason:     "daily token quota exhausted",
-	}
-}
-
-func (p *ChatPipeline) guardInput(ctx context.Context, env *RequestEnvelope) (string, *PolicyDecision) {
-	prompt := env.Prompt
-
-	// Nitro 属于同步安全关键路径，默认按 fail-closed 处理。
-	if p.nitroClient != nil {
-		nitroCtx, cancelNitro := context.WithTimeout(ctx, p.config.GuardrailNitroTimeout)
-		defer cancelNitro()
-
-		sanitized, err := p.nitroClient.CheckInput(nitroCtx, prompt)
+		resp, err := p.intelligenceClient.CheckOutput(ctx, &pb.OutputRequest{ResponseText: fullText})
 		if err != nil {
-			if strings.EqualFold(p.config.NitroFailureMode, "fail_open_with_audit") {
-				return prompt, &PolicyDecision{
-					Allow:           true,
-					Degraded:        true,
-					DegradeReason:   "nitro input guardrail unavailable",
-					SanitizedPrompt: prompt,
-				}
-			}
-			return prompt, &PolicyDecision{
-				StatusCode: http.StatusServiceUnavailable,
-				ErrorCode:  "guardrail_unavailable",
-				Message:    "input guardrail unavailable",
-				Reason:     "nitro safety check failed",
-			}
+			slog.Warn("async output guardrail check failed", "request_id", rid, "error", err)
+			return
 		}
-		prompt = sanitized
-	}
 
-	if p.intelligenceClient == nil {
-		return prompt, &PolicyDecision{Allow: true}
-	}
-
-	pyCtx, cancelPy := context.WithTimeout(ctx, p.config.GuardrailIntellTimeout)
-	defer cancelPy()
-
-	// Python 输入护栏属于可配置增强能力，可按 failure mode 决定 fail-open 还是 fail-closed。
-	pyResp, err := p.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
-	if err != nil {
-		if strings.EqualFold(p.config.PythonInputFailureMode, "fail_closed") {
-			return prompt, &PolicyDecision{
-				StatusCode: http.StatusServiceUnavailable,
-				ErrorCode:  "python_guardrail_unavailable",
-				Message:    "python input guardrail unavailable",
-				Reason:     "python input guardrail failure",
-			}
+		if !resp.Safe {
+			slog.Warn("stream content violation detected post-delivery", "request_id", rid)
+			// 记录一条特殊的流中断/违规审计事件
+			p.logAudit(env, &nodeName, EventStreamStop, "violation", "unsafe content detected in stream", fullText, true, "async moderation failed", 0)
 		}
-		slog.Warn("python input guardrail degraded", "request_id", env.RequestID, "error", err)
-		return prompt, &PolicyDecision{
-			Allow:           true,
-			Degraded:        true,
-			DegradeReason:   "python input guardrail unavailable",
-			SanitizedPrompt: prompt,
-		}
-	}
-
-	if !pyResp.Safe {
-		return prompt, &PolicyDecision{
-			StatusCode: http.StatusForbidden,
-			ErrorCode:  "security_block",
-			Message:    pyResp.Reason,
-			Reason:     pyResp.Reason,
-		}
-	}
-	return pyResp.SanitizedPrompt, &PolicyDecision{
-		Allow:           true,
-		SanitizedPrompt: pyResp.SanitizedPrompt,
-	}
+	}()
 }
 
 func (p *ChatPipeline) guardOutputResponse(ctx context.Context, env *RequestEnvelope, node *router.ModelNode, resp *models.ChatCompletionResponse) (*models.ChatCompletionResponse, *PolicyDecision) {
@@ -712,21 +595,7 @@ func (p *ChatPipeline) asyncCountTokens(rid, text, model string) {
 	}()
 }
 
-func (p *ChatPipeline) cleanupLocalLimiters() {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-	for range ticker.C {
-		// Redis 不可用时才会走本地限流器，因此定期回收长期未访问的租户状态。
-		p.mu.Lock()
-		now := p.now()
-		for key, limiter := range p.localLimiters {
-			if now.Sub(limiter.lastSeen) > time.Hour {
-				delete(p.localLimiters, key)
-			}
-		}
-		p.mu.Unlock()
-	}
-}
+
 
 func (p *ChatPipeline) logAudit(env *RequestEnvelope, nodeName *string, event string, status string, reason string, response string, degraded bool, degradeReason string, tokens int) {
 	if observability.GlobalAuditLogger == nil {

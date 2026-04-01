@@ -141,6 +141,9 @@ func (h *ChatHandler) streamExecute(c *gin.Context, ctx context.Context, env *pi
 					}
 				}
 				h.pipeline.RecordExecutionCompleted(env, nodeName, fullResponseBuilder.String(), chunkCount, result.Degraded, result.DegradeReason, "stream_completed")
+
+				// 异步调用输出护栏，对完整流式内容进行安全审计。
+				h.pipeline.GuardOutputAsync(env.RequestID, env, nodeName, fullResponseBuilder.String())
 				return
 			}
 

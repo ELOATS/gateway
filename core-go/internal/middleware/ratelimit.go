@@ -1,3 +1,5 @@
+// Deprecated: Rate limiting logic has been moved to internal/pipeline/policy.go.
+// This file will be removed in V2 Phase 2.
 package middleware
 
 import (
