@@ -102,4 +102,3 @@ func (p *DynamicProtocol) DecodeStreamChunk(line string) (*models.ChatCompletion
 func NewDynamicAdapter(p PluginConfig, apiKey string, timeout time.Duration) Provider {
 	return NewProtocolAdapter(&DynamicProtocol{Plugin: p}, apiKey, p.BaseURL, timeout)
 }
-

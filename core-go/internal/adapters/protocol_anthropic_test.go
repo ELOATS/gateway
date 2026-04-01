@@ -230,7 +230,6 @@ func TestAnthropicProtocol_DecodeStreamChunk(t *testing.T) {
 			resp, isDone, err := p.DecodeStreamChunk(tt.line)
 			require.NoError(t, err)
 
-
 			assert.Equal(t, tt.expectDone, isDone)
 
 			if tt.expectResp {

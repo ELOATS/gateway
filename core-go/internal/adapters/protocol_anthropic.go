@@ -78,7 +78,7 @@ type anthropicStreamEvent struct {
 		Type string `json:"type,omitempty"`
 		Text string `json:"text,omitempty"`
 	} `json:"delta,omitempty"`
-	ContentBlock *anthropicContent `json:"content_block,omitempty"`
+	ContentBlock *anthropicContent  `json:"content_block,omitempty"`
 	Message      *anthropicResponse `json:"message,omitempty"`
 	Usage        *anthropicUsage    `json:"usage,omitempty"`
 }

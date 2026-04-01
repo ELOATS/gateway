@@ -471,8 +471,6 @@ func (p *ChatPipeline) RecordDegraded(env *RequestEnvelope, nodeName string, rea
 	p.logAudit(env, nodeNamePtr(nodeName), EventDegraded, "accepted", reason, "", true, reason, 0)
 }
 
-
-
 func (p *ChatPipeline) GuardOutputAsync(rid string, env *RequestEnvelope, nodeName string, fullText string) {
 	if p.intelligenceClient == nil || fullText == "" {
 		return
@@ -594,8 +592,6 @@ func (p *ChatPipeline) asyncCountTokens(rid, text, model string) {
 		}
 	}()
 }
-
-
 
 func (p *ChatPipeline) logAudit(env *RequestEnvelope, nodeName *string, event string, status string, reason string, response string, degraded bool, degradeReason string, tokens int) {
 	if observability.GlobalAuditLogger == nil {

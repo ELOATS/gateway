@@ -36,11 +36,11 @@ type EngineConfig struct {
 
 // PolicyEngine 实现了基于声明式配置的策略决策。
 type PolicyEngine struct {
-	mu           sync.RWMutex
-	chain        []Policy
-	configPath   string
-	deps         *DependencyContainer
-	lastModTime  time.Time
+	mu          sync.RWMutex
+	chain       []Policy
+	configPath  string
+	deps        *DependencyContainer
+	lastModTime time.Time
 }
 
 // NewPolicyEngine 从文件路径加载并初始化策略引擎，并开启自动热加载。
