@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,9 +16,11 @@ import (
 	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/cache"
 	"github.com/ai-gateway/core/internal/config"
+	"github.com/ai-gateway/core/internal/dependencies"
 	"github.com/ai-gateway/core/internal/middleware"
 	"github.com/ai-gateway/core/internal/nitro"
 	"github.com/ai-gateway/core/internal/observability"
+	"github.com/ai-gateway/core/internal/quota"
 	"github.com/ai-gateway/core/internal/router"
 	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
@@ -25,7 +28,6 @@ import (
 )
 
 const (
-	// 审计事件名统一由 pipeline 定义，避免不同执行路径写出不一致的事件语义。
 	EventReceived   = "request_received"
 	EventRejected   = "request_rejected"
 	EventStarted    = "execution_started"
@@ -38,11 +40,9 @@ var streamModerationBlacklist = []string{
 	"ignore previous",
 	"forget all instructions",
 	"system prompt",
-	"大语言模型不能",
+	"large language model cannot",
 }
 
-// RequestEnvelope 是统一热路径中的“请求真相源”。
-// 进入策略阶段后，后续逻辑只消费这个结构，不再反复从 Gin 或原始 JSON 中取值。
 type RequestEnvelope struct {
 	RequestID string
 	APIKey    string
@@ -54,8 +54,6 @@ type RequestEnvelope struct {
 	Request   *models.ChatCompletionRequest
 }
 
-// PolicyDecision 表示同步策略阶段的唯一输出。
-// 任意拒绝、放行、降级都需要先落到这个结构，再决定是否进入执行阶段。
 type PolicyDecision struct {
 	Allow           bool
 	StatusCode      int
@@ -68,16 +66,12 @@ type PolicyDecision struct {
 	DegradeReason   string
 }
 
-// ExecutionPlan 表示已经完成策略决策后的执行计划。
-// 它要么指向缓存命中结果，要么指向一个明确的上游路由目标。
 type ExecutionPlan struct {
 	RouteContext *router.RouteContext
 	Node         *router.ModelNode
 	Cached       *models.ChatCompletionResponse
 }
 
-// ExecutionResult 是执行阶段的统一返回值。
-// 同步响应和流式响应都被包装成这一层，便于后续审计和输出护栏共用一套语义。
 type ExecutionResult struct {
 	Response      *models.ChatCompletionResponse
 	Stream        <-chan *models.ChatCompletionStreamResponse
@@ -88,58 +82,43 @@ type ExecutionResult struct {
 	DegradeReason string
 }
 
-// ChatPipeline 将“规范化 -> 策略 -> 规划 -> 执行 -> 审计”收敛到一个协调器中。
-// Gin handler 只负责驱动它，不再自己承载零散的业务判断。
 type ChatPipeline struct {
-	policyEngine       *PolicyEngine
-	intelligenceClient pb.AiLogicClient
-	nitroClient        nitro.NitroClient
-	router             *router.SmartRouter
-	config             *config.Config
-	rdb                *redis.Client
-	contextStore       *cache.ContextStore
-
-	now func() time.Time
+	policyEngine *PolicyEngine
+	dependencies *dependencies.Facade
+	router       *router.SmartRouter
+	config       *config.Config
+	rdb          *redis.Client
+	contextStore *cache.ContextStore
+	now          func() time.Time
 }
 
-// NewChatPipeline 初始化统一请求管线，并根据配置文件初始化策略引擎。
 func NewChatPipeline(ic pb.AiLogicClient, nc nitro.NitroClient, sr *router.SmartRouter, rdb *redis.Client, cfg *config.Config) *ChatPipeline {
-	// 确保所有内置策略已注册
 	RegisterPolicies()
 
+	facade := dependencies.NewFacade(ic, nc, cfg)
 	deps := &DependencyContainer{
-		IntelligenceClient: ic,
-		NitroClient:        nc,
-		RedisClient:        rdb,
-		Config:             cfg,
+		Dependencies: facade,
+		RedisClient:  rdb,
+		Config:       cfg,
 	}
 
-	// 加载策略引擎。默认尝试加载 configs/policies.yaml。
-	// 通过环境变量支持自定义路径，便于在测试或不同环境下灵活配置。
-	policyPath := os.Getenv("GATEWAY_POLICIES_PATH")
-	if policyPath == "" {
-		policyPath = "configs/policies.yaml"
-	}
-
+	policyPath := resolvePolicyPath(cfg)
 	engine, err := NewPolicyEngine(policyPath, deps)
 	if err != nil {
 		slog.Error("failed to load policy engine, requests may be blocked", "path", policyPath, "error", err)
 	}
 
-	p := &ChatPipeline{
-		policyEngine:       engine,
-		intelligenceClient: ic,
-		nitroClient:        nc,
-		router:             sr,
-		config:             cfg,
-		rdb:                rdb,
-		contextStore:       cache.NewContextStore(rdb, 24*time.Hour),
-		now:                time.Now,
+	return &ChatPipeline{
+		policyEngine: engine,
+		dependencies: facade,
+		router:       sr,
+		config:       cfg,
+		rdb:          rdb,
+		contextStore: cache.NewContextStore(rdb, 24*time.Hour),
+		now:          time.Now,
 	}
-	return p
 }
 
-// Normalize 只做请求解析和最小字段提取，不做任何策略判断。
 func (p *ChatPipeline) Normalize(c *gin.Context, start time.Time) (*RequestEnvelope, *PolicyDecision) {
 	var req models.ChatCompletionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -167,8 +146,6 @@ func (p *ChatPipeline) Normalize(c *gin.Context, start time.Time) (*RequestEnvel
 	return env, nil
 }
 
-// EvaluatePolicies 按配置中的顺序执行策略链。
-// 这一步是进入上游执行前唯一允许做“是否放行”判断的地方。
 func (p *ChatPipeline) EvaluatePolicies(c *gin.Context, ctx context.Context, env *RequestEnvelope) *PolicyDecision {
 	if p.policyEngine == nil {
 		return &PolicyDecision{
@@ -184,21 +161,16 @@ func (p *ChatPipeline) EvaluatePolicies(c *gin.Context, ctx context.Context, env
 		return decision
 	}
 
-	// 如果放行，应用可能已经被清洗过的 Prompt
 	replaceLastMessage(env.Request, decision.SanitizedPrompt)
-
 	return decision
 }
 
-// BuildPlan 在策略阶段通过后生成执行计划。
 func (p *ChatPipeline) BuildPlan(ctx context.Context, c *gin.Context, env *RequestEnvelope) (*ExecutionPlan, *PolicyDecision) {
 	p.asyncCountTokens(env.RequestID, env.Prompt, env.Model)
 
-	// 如果携带 SessionID，自动注入历史上下文
 	if env.SessionID != "" && p.contextStore != nil {
 		history, err := p.contextStore.Retrieve(ctx, env.SessionID)
 		if err == nil && len(history) > 0 {
-			// 在当前请求的消息列表前，插入历史记录
 			env.Request.Messages = append(history, env.Request.Messages...)
 			slog.Debug("session context injected", "session_id", env.SessionID, "history_len", len(history))
 		}
@@ -206,11 +178,7 @@ func (p *ChatPipeline) BuildPlan(ctx context.Context, c *gin.Context, env *Reque
 
 	if !env.Request.Stream {
 		if cached, degraded, degradeReason, hardFailure := p.checkCache(ctx, env); cached != nil {
-			return &ExecutionPlan{Cached: cached}, &PolicyDecision{
-				Allow:         true,
-				Degraded:      degraded,
-				DegradeReason: degradeReason,
-			}
+			return &ExecutionPlan{Cached: cached}, &PolicyDecision{Allow: true, Degraded: degraded, DegradeReason: degradeReason}
 		} else if hardFailure {
 			return nil, &PolicyDecision{
 				StatusCode: http.StatusServiceUnavailable,
@@ -219,7 +187,6 @@ func (p *ChatPipeline) BuildPlan(ctx context.Context, c *gin.Context, env *Reque
 				Reason:     degradeReason,
 			}
 		} else if degradeReason != "" || degraded {
-			// 将非阻断型降级显式写入上下文，便于最终审计统一落盘。
 			c.Set("pipeline_cache_degraded", degraded)
 			c.Set("pipeline_cache_degrade_reason", degradeReason)
 		}
@@ -255,7 +222,6 @@ func (p *ChatPipeline) BuildPlan(ctx context.Context, c *gin.Context, env *Reque
 	return &ExecutionPlan{RouteContext: routeCtx, Node: node}, nil
 }
 
-// ExecuteSync 执行非流式请求，并在 provider 调用后统一补上输出护栏和降级语义。
 func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, plan *ExecutionPlan, degraded bool, degradeReason string) (*ExecutionResult, *PolicyDecision) {
 	if plan.Cached != nil {
 		response, outputDecision := p.guardOutputResponse(ctx, env, nil, plan.Cached)
@@ -276,22 +242,16 @@ func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, pl
 		maxRetries = 0
 	}
 
-	var combinedDegraded = degraded
+	combinedDegraded := degraded
 	combinedReason := degradeReason
 
-	// 重试只发生在已经通过策略校验之后；失败节点会被排除，避免同一上游被重复命中。
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				return nil, &PolicyDecision{
-					StatusCode: http.StatusRequestTimeout,
-					ErrorCode:  "request_cancelled",
-					Message:    "request cancelled while retrying provider",
-					Reason:     "execution context cancelled",
-				}
+				return nil, &PolicyDecision{StatusCode: http.StatusRequestTimeout, ErrorCode: "request_cancelled", Message: "request cancelled while retrying provider", Reason: "execution context cancelled"}
 			}
 		}
 
@@ -299,12 +259,7 @@ func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, pl
 		routeCtx.ExcludeNodes = excluded
 		node, err := p.router.Route(&routeCtx)
 		if err != nil {
-			return nil, &PolicyDecision{
-				StatusCode: http.StatusServiceUnavailable,
-				ErrorCode:  "routing_error",
-				Message:    err.Error(),
-				Reason:     "no execution target available",
-			}
+			return nil, &PolicyDecision{StatusCode: http.StatusServiceUnavailable, ErrorCode: "routing_error", Message: err.Error(), Reason: "no execution target available"}
 		}
 
 		callStart := p.now()
@@ -317,12 +272,7 @@ func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, pl
 				excluded = append(excluded, node.Name)
 				continue
 			}
-			return nil, &PolicyDecision{
-				StatusCode: http.StatusBadGateway,
-				ErrorCode:  "provider_error",
-				Message:    err.Error(),
-				Reason:     "all configured providers failed",
-			}
+			return nil, &PolicyDecision{StatusCode: http.StatusBadGateway, ErrorCode: "provider_error", Message: err.Error(), Reason: "all configured providers failed"}
 		}
 
 		p.router.Tracker.RecordSuccess(node.Name, callDuration)
@@ -330,56 +280,29 @@ func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, pl
 		if outputDecision != nil && !outputDecision.Allow {
 			return nil, outputDecision
 		}
-
 		if outputDecision != nil && outputDecision.Degraded {
 			combinedDegraded = true
 			combinedReason = joinReasons(combinedReason, outputDecision.DegradeReason)
 		}
 
 		if env.APIKey != "" && response.Usage.TotalTokens > 0 && p.rdb != nil {
-			go middleware.UpdateQuotaUsage(context.Background(), p.rdb, env.APIKey, int64(response.Usage.TotalTokens))
+			go quota.UpdateUsage(context.Background(), p.rdb, env.APIKey, int64(response.Usage.TotalTokens))
 		}
 
-		return &ExecutionResult{
-			Response:      response,
-			Node:          node,
-			FromCache:     false,
-			Degraded:      combinedDegraded,
-			DegradeReason: combinedReason,
-		}, nil
+		return &ExecutionResult{Response: response, Node: node, FromCache: false, Degraded: combinedDegraded, DegradeReason: combinedReason}, nil
 	}
 
-	return nil, &PolicyDecision{
-		StatusCode: http.StatusBadGateway,
-		ErrorCode:  "provider_error",
-		Message:    "provider execution failed",
-		Reason:     "unreachable execution state",
-	}
+	return nil, &PolicyDecision{StatusCode: http.StatusBadGateway, ErrorCode: "provider_error", Message: "provider execution failed", Reason: "unreachable execution state"}
 }
 
-// ExecuteStream 只负责建立流式上游通道。
-// 真正的 chunk 审查、SSE 输出和审计仍由 handler 驱动，但语义来源保持一致。
 func (p *ChatPipeline) ExecuteStream(env *RequestEnvelope, plan *ExecutionPlan, degraded bool, degradeReason string) (*ExecutionResult, *PolicyDecision) {
 	if plan.Cached != nil {
-		return nil, &PolicyDecision{
-			StatusCode: http.StatusBadRequest,
-			ErrorCode:  "stream_cache_misshaped",
-			Message:    "cached responses are not available for SSE replay",
-			Reason:     "stream requests require provider streaming",
-			Degraded:   degraded,
-		}
+		return nil, &PolicyDecision{StatusCode: http.StatusBadRequest, ErrorCode: "stream_cache_misshaped", Message: "cached responses are not available for SSE replay", Reason: "stream requests require provider streaming", Degraded: degraded}
 	}
 	stream, errCh := plan.Node.Adapter.ChatCompletionStream(env.Request)
-	return &ExecutionResult{
-		Stream:        stream,
-		StreamErrors:  errCh,
-		Node:          plan.Node,
-		Degraded:      degraded,
-		DegradeReason: degradeReason,
-	}, nil
+	return &ExecutionResult{Stream: stream, StreamErrors: errCh, Node: plan.Node, Degraded: degraded, DegradeReason: degradeReason}, nil
 }
 
-// GuardStreamChunk 对流式输出做滑动窗口审查，避免敏感短语跨 chunk 漏检。
 func (p *ChatPipeline) GuardStreamChunk(window *strings.Builder, chunk string) *PolicyDecision {
 	window.WriteString(chunk)
 	text := window.String()
@@ -393,18 +316,12 @@ func (p *ChatPipeline) GuardStreamChunk(window *strings.Builder, chunk string) *
 	lower := strings.ToLower(text)
 	for _, badWord := range streamModerationBlacklist {
 		if strings.Contains(lower, badWord) {
-			return &PolicyDecision{
-				StatusCode: http.StatusForbidden,
-				ErrorCode:  "moderation_triggered",
-				Message:    "[内容检测中止：触发流式安全防护]",
-				Reason:     badWord,
-			}
+			return &PolicyDecision{StatusCode: http.StatusForbidden, ErrorCode: "moderation_triggered", Message: "[content blocked: stream safety policy triggered]", Reason: badWord}
 		}
 	}
 	return nil
 }
 
-// RespondDecision 将策略阶段产生的拒绝结果统一映射为 HTTP 响应和审计事件。
 func (p *ChatPipeline) RespondDecision(c *gin.Context, env *RequestEnvelope, decision *PolicyDecision) {
 	if decision == nil {
 		return
@@ -417,12 +334,9 @@ func (p *ChatPipeline) RespondDecision(c *gin.Context, env *RequestEnvelope, dec
 		c.Header("Retry-After", decision.RetryAfter)
 	}
 
-	model := ""
-	if env != nil {
+	model := "unknown"
+	if env != nil && env.Model != "" {
 		model = env.Model
-	}
-	if model == "" {
-		model = "unknown"
 	}
 	observability.RequestsTotal.WithLabelValues(strconv.Itoa(decision.StatusCode), model).Inc()
 
@@ -441,7 +355,6 @@ func (p *ChatPipeline) RespondDecision(c *gin.Context, env *RequestEnvelope, dec
 	c.JSON(decision.StatusCode, payload)
 }
 
-// RecordExecutionStarted/Completed/StreamBlocked/Degraded 统一封装审计事件，避免不同路径手写字段。
 func (p *ChatPipeline) RecordExecutionStarted(env *RequestEnvelope, nodeName string, degraded bool, degradeReason string) {
 	p.logAudit(env, nodeNamePtr(nodeName), EventStarted, "accepted", "", "", degraded, degradeReason, 0)
 }
@@ -449,15 +362,10 @@ func (p *ChatPipeline) RecordExecutionStarted(env *RequestEnvelope, nodeName str
 func (p *ChatPipeline) RecordExecutionCompleted(env *RequestEnvelope, nodeName string, responseText string, tokens int, degraded bool, degradeReason string, status string) {
 	p.logAudit(env, nodeNamePtr(nodeName), EventCompleted, status, "", responseText, degraded, degradeReason, tokens)
 
-	// 异步更新 Session 记忆
 	if env.SessionID != "" && p.contextStore != nil && status == "200" && responseText != "" {
 		go func() {
-			// 仅保存当前回合：最后一条 User 消息 + 刚生成的 Assistant 回复
-			currentRound := []models.Message{
-				{Role: "user", Content: env.Prompt},
-				{Role: "assistant", Content: responseText},
-			}
-			p.contextStore.Append(context.Background(), env.SessionID, currentRound)
+			currentRound := []models.Message{{Role: "user", Content: env.Prompt}, {Role: "assistant", Content: responseText}}
+			_ = p.contextStore.Append(context.Background(), env.SessionID, currentRound)
 		}()
 	}
 }
@@ -472,94 +380,56 @@ func (p *ChatPipeline) RecordDegraded(env *RequestEnvelope, nodeName string, rea
 }
 
 func (p *ChatPipeline) GuardOutputAsync(rid string, env *RequestEnvelope, nodeName string, fullText string) {
-	if p.intelligenceClient == nil || fullText == "" {
+	if p.dependencies == nil || p.dependencies.IntelligenceClient() == nil || fullText == "" {
 		return
 	}
 
-	// 异步执行输出护栏，不阻塞请求路径。
-	// 主要用于审计合规和事后风险分析。
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), p.config.GuardrailIntellTimeout)
 		defer cancel()
 
-		resp, err := p.intelligenceClient.CheckOutput(ctx, &pb.OutputRequest{ResponseText: fullText})
+		resp, err := p.dependencies.IntelligenceClient().CheckOutput(ctx, &pb.OutputRequest{ResponseText: fullText})
 		if err != nil {
 			slog.Warn("async output guardrail check failed", "request_id", rid, "error", err)
 			return
 		}
-
 		if !resp.Safe {
 			slog.Warn("stream content violation detected post-delivery", "request_id", rid)
-			// 记录一条特殊的流中断/违规审计事件
 			p.logAudit(env, &nodeName, EventStreamStop, "violation", "unsafe content detected in stream", fullText, true, "async moderation failed", 0)
 		}
 	}()
 }
 
 func (p *ChatPipeline) guardOutputResponse(ctx context.Context, env *RequestEnvelope, node *router.ModelNode, resp *models.ChatCompletionResponse) (*models.ChatCompletionResponse, *PolicyDecision) {
-	if resp == nil || len(resp.Choices) == 0 || p.intelligenceClient == nil {
+	if resp == nil || len(resp.Choices) == 0 || p.dependencies == nil {
 		return resp, nil
 	}
 
-	text := resp.Choices[0].Message.GetText()
-	pyCtx, cancelPy := context.WithTimeout(ctx, p.config.GuardrailIntellTimeout)
-	defer cancelPy()
-
-	// 输出护栏放在 provider 返回之后统一执行，保证同步与缓存路径语义一致。
-	pyResp, err := p.intelligenceClient.CheckOutput(pyCtx, &pb.OutputRequest{ResponseText: text})
-	if err != nil {
-		if strings.EqualFold(p.config.PythonOutputFailureMode, "fail_closed") {
-			return resp, &PolicyDecision{
-				StatusCode: http.StatusServiceUnavailable,
-				ErrorCode:  "python_output_guardrail_unavailable",
-				Message:    "python output guardrail unavailable",
-				Reason:     "python output guardrail failure",
-			}
-		}
-		slog.Warn("python output guardrail degraded", "request_id", env.RequestID, "error", err)
-		return resp, &PolicyDecision{
-			Allow:         true,
-			Degraded:      true,
-			DegradeReason: "python output guardrail unavailable",
-		}
+	outcome := p.dependencies.CheckOutput(ctx, resp.Choices[0].Message.GetText())
+	if !outcome.Allowed {
+		return resp, &PolicyDecision{StatusCode: outcome.StatusCode, ErrorCode: outcome.ErrorCode, Message: outcome.Message, Reason: outcome.Reason}
 	}
 
-	resp.Choices[0].Message.Content = pyResp.SanitizedText
-	if !pyResp.Safe {
-		return resp, &PolicyDecision{
-			Allow:           true,
-			Degraded:        true,
-			DegradeReason:   "output sanitized by guardrail",
-			SanitizedPrompt: pyResp.SanitizedText,
-		}
+	resp.Choices[0].Message.Content = outcome.SanitizedText
+	if outcome.Degraded {
+		return resp, &PolicyDecision{Allow: true, Degraded: true, DegradeReason: outcome.DegradeReason}
 	}
 	return resp, nil
 }
 
 func (p *ChatPipeline) checkCache(ctx context.Context, env *RequestEnvelope) (*models.ChatCompletionResponse, bool, string, bool) {
-	if p.intelligenceClient == nil {
+	if p.dependencies == nil {
 		return nil, false, "", false
 	}
 
-	cacheCtx, cancel := context.WithTimeout(ctx, p.config.CacheTimeout)
-	defer cancel()
-
-	// 缓存只影响“是否继续执行上游”，不允许改变基础安全语义。
-	cacheResp, err := p.intelligenceClient.GetCache(cacheCtx, &pb.CacheRequest{
-		Prompt: env.Prompt,
-		Model:  env.Model,
-	})
-	if err != nil {
-		if strings.EqualFold(p.config.PythonCacheFailureMode, "fail_closed") {
-			return nil, false, "semantic cache unavailable", true
-		}
-		slog.Warn("semantic cache degraded", "request_id", env.RequestID, "error", err)
+	cacheOutcome := p.dependencies.GetCache(ctx, env.Prompt, env.Model)
+	if cacheOutcome.HardFailure {
 		observability.CacheHitsTotal.WithLabelValues("miss", env.Model).Inc()
-		return nil, true, "semantic cache unavailable", false
+		return nil, false, cacheOutcome.DegradeReason, true
 	}
-	if !cacheResp.Hit {
+	if !cacheOutcome.Hit {
 		observability.CacheHitsTotal.WithLabelValues("miss", env.Model).Inc()
-		return nil, false, "", false
+		return nil, cacheOutcome.Degraded, cacheOutcome.DegradeReason, false
 	}
 
 	observability.CacheHitsTotal.WithLabelValues("hit", env.Model).Inc()
@@ -567,27 +437,24 @@ func (p *ChatPipeline) checkCache(ctx context.Context, env *RequestEnvelope) (*m
 		ID:    fmt.Sprintf("cache-%s", env.RequestID),
 		Model: env.Model,
 		Choices: []models.Choice{{
-			Index: 0,
-			Message: models.Message{
-				Role:    "assistant",
-				Content: cacheResp.Response,
-			},
+			Index:        0,
+			Message:      models.Message{Role: "assistant", Content: cacheOutcome.Response},
 			FinishReason: "stop",
 		}},
 	}, false, "", false
 }
 
 func (p *ChatPipeline) asyncCountTokens(rid, text, model string) {
-	if p.nitroClient == nil {
+	if p.dependencies == nil {
 		return
 	}
-	// Token 统计属于异步补偿路径，失败不影响主请求返回。
+
 	go func() {
 		tCtx, cancel := context.WithTimeout(context.Background(), p.config.TokenCountTimeout)
 		defer cancel()
 		tCtx = observability.NewOutContext(tCtx, rid)
-		count, err := p.nitroClient.CountTokens(tCtx, model, text)
-		if err == nil {
+		count, err := p.dependencies.CountTokens(tCtx, model, text)
+		if err == nil && count > 0 {
 			observability.TokenUsage.WithLabelValues(model).Add(float64(count))
 		}
 	}()
@@ -597,15 +464,7 @@ func (p *ChatPipeline) logAudit(env *RequestEnvelope, nodeName *string, event st
 	if observability.GlobalAuditLogger == nil {
 		return
 	}
-	record := &observability.AuditRecord{
-		Timestamp: p.now(),
-		Event:     event,
-		Status:    status,
-		Reason:    joinReasons(reason, degradeReason),
-		Degraded:  degraded,
-		Response:  response,
-		Tokens:    tokens,
-	}
+	record := &observability.AuditRecord{Timestamp: p.now(), Event: event, Status: status, Reason: joinReasons(reason, degradeReason), Degraded: degraded, Response: response, Tokens: tokens}
 	if env != nil {
 		record.RequestID = env.RequestID
 		record.APIKey = env.APIKey
@@ -642,21 +501,21 @@ func checkRedisRateLimit(ctx context.Context, rdb *redis.Client, label string, q
 	}
 
 	script := `
-		local key = KEYS[1]
-		local now = tonumber(ARGV[1])
-		local window = tonumber(ARGV[2])
-		local limit = tonumber(ARGV[3])
+        local key = KEYS[1]
+        local now = tonumber(ARGV[1])
+        local window = tonumber(ARGV[2])
+        local limit = tonumber(ARGV[3])
 
-		redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-		local count = redis.call('ZCARD', key)
-		if count >= limit then
-			return 0
-		else
-			redis.call('ZADD', key, now, now)
-			redis.call('PEXPIRE', key, window)
-			return 1
-		end
-	`
+        redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+        local count = redis.call('ZCARD', key)
+        if count >= limit then
+            return 0
+        else
+            redis.call('ZADD', key, now, now)
+            redis.call('PEXPIRE', key, window)
+            return 1
+        end
+    `
 	res, err := rdb.Eval(ctx, script, []string{key}, now, window, limit).Int()
 	if err != nil {
 		return false, err
@@ -716,6 +575,39 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func resolvePolicyPath(cfg *config.Config) string {
+	if cfg != nil && cfg.Paths.PolicyFile != "" {
+		return cfg.Paths.PolicyFile
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return filepath.Join("configs", "policies.yaml")
+	}
+
+	candidates := []string{
+		filepath.Join("configs", "policies.yaml"),
+		filepath.Join("core-go", "configs", "policies.yaml"),
+	}
+
+	dir := wd
+	for range 8 {
+		for _, candidate := range candidates {
+			resolved := filepath.Join(dir, candidate)
+			if _, statErr := os.Stat(resolved); statErr == nil {
+				return resolved
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return filepath.Join("configs", "policies.yaml")
 }
 
 func MarshalSSEData(resp *models.ChatCompletionStreamResponse) []byte {

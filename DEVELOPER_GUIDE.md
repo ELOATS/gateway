@@ -1,124 +1,107 @@
-# AI 网关：系统架构白皮书与技术规格说明 (V5 - 全量打磨版)
+# Developer Guide
 
-欢迎加入 AI 网关研发团队。本系统是一个典型的**多语言微服务协作系统**，通过 Go、Rust 和 Python 的深度集成，构建了一套兼具高并发、高性能与高智能的 AI 治理方案。
+本文档说明当前 Gateway 的开发边界、扩展方式和日常验证流程。目标是让新增一个策略、Provider、依赖服务或管理接口时，改动范围尽量局限在单一模块与装配层。
 
----
+## 1. 先理解现在的边界
 
-## 📖 1. 设计哲学：多语言三层架构的必然性
+当前代码已经按职责收口，推荐把 `core-go` 理解为五层：
 
-在设计之初，我们对比了单一技术栈的局限性，
-- **纯 Python**: 无法支撑万级并发，分词与正则性能在高吞吐下会成为瓶颈。
-- **纯 Go**: 缺乏成熟的向量检索和复杂的 Transformer 库支持。
-- **纯 Rust**: 开发业务逻辑（如多变的缓存策略）成本过高。
-最终采用 **"分层治理，各取所长" (Best Tool for Each Plane)** 的策略：
+- `transport`：请求协议适配，主要位于 `internal/handlers` 和 `internal/routes`。
+- `application`：用例编排，当前核心是 `internal/application/chat`。
+- `pipeline`：主链路阶段化处理，位于 `internal/pipeline`。
+- `infrastructure`：Provider、Redis、审计、动态插件、外部连接。
+- `bootstrap`：程序入口、配置加载、运行时状态注册，位于 `cmd/gateway`。
 
-| 平面 (Plane) | 技术栈 | 角色 | 选型理由 |
-| :--- | :--- | :--- | :--- |
-| **编排层 (Orchestration)** | **Go** | 交通枢纽 | 卓越的网络 I/O 处理能力和 Goroutine 并发模型，适合作为流量调度与聚合中心。 |
-| **加速层 (Nitro)** | **Rust** | 动力引擎 | 零成本抽象、无 GC 暂停。在 Token 分词和正则匹配上，性能高出 Python 数个量级。 |
-| **智能层 (Intelligence)** | **Python** | 推理大脑 | 拥有最顶级的 AI 生态（Transformers, Faiss），能毫秒级实现复杂的语义匹配。 |
+不要再把业务编排写回 handler，也不要在 pipeline 里直接拼 gRPC client 与 failure mode 逻辑。
 
----
+## 2. 关键文件
 
-## 🏗 2. 系统核心组件深度解析 (基于 Go 标准布局)
+建议优先熟悉这些入口：
 
-系统遵循 **Standard Go Project Layout**，旨在通过目录结构强制执行内部逻辑的封装。
+- [main.go](/D:/workspace/codes4/gateway/core-go/cmd/gateway/main.go)
+- [bootstrap.go](/D:/workspace/codes4/gateway/core-go/cmd/gateway/bootstrap.go)
+- [service.go](/D:/workspace/codes4/gateway/core-go/internal/application/chat/service.go)
+- [contracts.go](/D:/workspace/codes4/gateway/core-go/internal/application/chat/contracts.go)
+- [chat.go](/D:/workspace/codes4/gateway/core-go/internal/handlers/chat.go)
+- [chat_pipeline.go](/D:/workspace/codes4/gateway/core-go/internal/pipeline/chat_pipeline.go)
+- [policy.go](/D:/workspace/codes4/gateway/core-go/internal/pipeline/policy.go)
+- [facade.go](/D:/workspace/codes4/gateway/core-go/internal/dependencies/facade.go)
+- [config.go](/D:/workspace/codes4/gateway/core-go/internal/config/config.go)
 
-### 2.1 编排层 (core-go)
-- **`cmd/gateway/main.go`**: **系统的骨架**。仅负责加载环境变量、初始化 gRPC 连接池及启动服务。
-- **`internal/handlers/`**: **业务编排**。`ChatHandler` 通过依赖注入协调全链路流程。
-- **`internal/routes/`**: **路标中心**。集中定义路由、版本控制及中间件绑定（Auth、Metric）。
-- **`internal/observability/`**: **全链路探针**。定义指标维度及初始化 JSON 结构化日志。
-- **`pkg/models/`**: **公共协议**。定义所有平面共享的 DTO 结构。
-- **`api/gateway/v1/`**: **通讯录**。存放自动生成的 gRPC Stub 代码。
+## 3. 扩展规则
 
-### 2.2 智能层 (logic-python)
-- **向量化引擎 (`SentenceTransformer`)**: 采用 `all-MiniLM-L6-v2` 384 维模型。
-- **内存索引 (`Faiss`)**: 采用 L2 空间距离算法，实现毫秒级语义相似度搜索。
+### 新增 Provider
 
-### 2.3 加速层 (utils-rust)
-- **分词引擎 (`Tiktoken`)**: 集成 OpenAI BPE 算法，针对不同模型动态切换编码方案。
-- **正则引擎**: 利用 Rust 编译器优化，实现毫秒级敏感信息（PII）脱敏。
+只在 adapter / provider 相关目录实现，不要让业务层感知具体供应商类型。
 
----
+- 维护 Provider 接口兼容性。
+- 在装配层注册新 Provider。
+- 如需动态插件，校验逻辑放在 adapter loader，而不是 handler 或 pipeline。
 
-## 🔄 3. 全链路请求追踪：一个 Prompt 的一生
+### 新增策略
 
-了解请求的生命周期是每一位开发者的必修课：
+策略属于 policy / pipeline 边界，不要在 Gin middleware 和 pipeline 双处重复实现。
 
-1.  **准入 (Go)**: `AuthRequired` 拦截器检查 Bearer Token 并生成唯一的 **Request-ID (RID)**。                                           │
-2.  **可观测性初始化 (Go)**: `slog` 打印第一条日志 `{"msg": "Incoming request", "request_id": "..."}`。                                 │
-3.  **异步计费启动 (Rust)**: Go 开启 `goroutine` 异步发送原文至 Rust。Rust 提取 Metadata 中的 `x-request-id` 并计算 Token 消耗。        │
-4.  **语义检索 (Python)**: Go 调用 Python 的 `GetCache`。Python 将文本 Embedding 后在 Faiss 空间中进行扫描。若命中，Go 直接结束请求。   │
-5.  **命中: 返回 `hit=true` 及其内容，Go 直接结束请求，极大节省成本。                                                                     │
-6.  **未命中: 继续后续流程。                                                                                                              │
-7.  **Nitro 加速脱敏 (Rust)**: 若未命中缓存，Rust `CheckInput` 启动，利用正则 DFA 状态机瞬间抹除敏感字段。                              │
-8.  **深度安全审计 (Python)**: 经过 Rust 初筛的文本进入 Python，检查是否存在“提示词注入”风险。                                          │
-9.  **动态路由决策 (Go)**: `router` 包基于 **加权轮询算法** 算出本次请求的最佳供应商（如主节点 80% 流量）。                             │
-10.  **上游代理 (Go)**: `adapters` 执行真实的 HTTPS 调用。                                                                               │
-11.  **输出幻觉检测 (Python)**: 模型返回结果后，Python `CheckOutput` 介入，通过启发式策略检查响应中是否存在逻辑自相矛盾的内容。          │
-12.  **响应回执 (Go)**: 最终结果返回时，Go 更新 Prometheus 延迟直方图并返回结果。
+- 输入护栏、工具权限、限流、配额都应统一表达在策略阶段。
+- 失败语义要清晰区分 `fail_closed`、`fail_open`、`fail_open_with_audit`。
+- 新策略至少补单元测试和一个失败路径测试。
 
----
+### 新增外部依赖
 
-## 🛠 4. 实战扩展：如何优雅地增加功能？
+所有 Python / Rust / gRPC / 远端服务依赖，都要先收口到 dependency facade。
 
-### A. 添加模型提供商 (如 Claude)
-在 `internal/adapters/` 中实现 `Provider` 接口，并在 `main.go` 中注册新 Candidate。
+- 业务层只拿稳定接口，不感知网络细节。
+- 超时、降级、错误映射都在 facade 里做。
+- 如新增 proto 字段，只允许兼容性扩展。
 
-### B. 进阶案例：实现“每日消费配额”中间件
-**场景**: 需要限制每个 API Key 每天只能消耗 100,000 个 Token。
-1.  **解耦设计**: 在 `internal/middleware/` 下新建 `quota.go`。
-2.  **挂载**: 在 `internal/routes/routes.go` 中通过 `.Use(middleware.QuotaLimiter())` 插入。
-3.  **价值**: 实现了功能的“热插拔”，核心业务代码无需任何修改。
+## 4. 配置约束
 
----
+当前配置由 [config.go](/D:/workspace/codes4/gateway/core-go/internal/config/config.go) 统一加载和归一化。
 
-## 🐞 5. 故障排查与修复标准流程 (SOP)
+必须遵守这些规则：
 
-### 5.1 快速隔离 (Isolation)
-- **RID 追踪**: 在日志中搜索特定的 `request_id`，观察请求在哪个平面发生断点。
-- **gRPC 错误**: 若出现 `DeadlineExceeded`，说明后端处理超时（通常是 Python 层的 Embedding 推理过慢）。
+- 外部文件路径只能通过配置注入，不能在模块内部写死默认路径。
+- 默认策略文件由仓库提供，当前基线是 [policies.yaml](/D:/workspace/codes4/gateway/core-go/configs/policies.yaml)。
+- 启动必需配置缺失时，应在启动阶段失败，而不是在请求链路中途失败。
+- 可降级依赖缺失时，应明确进入 degraded，而不是悄悄跳过。
 
-### 5.2 深度案例：排查“语义缓存漂移” (误命中)
-**故障现象**: 用户问“写个 Python 脚本”，系统返回了“Java 冒泡排序”的缓存结果。
-1.  **排查**: 通过 RID 发现 Python 日志显示 `Semantic Cache HIT`，但 `Distance: 0.19` 极其接近 `0.2` 的阈值。
-2.  **根因**: 向量模型对相似意图的短句投影过近，导致语义重叠。
-3.  **修复**:
-     - **紧急**: 将 `main.py` 中的阈值收紧至 `0.1`。
-     - **根治**: 修改 `GetCache` 协议，使缓存 Key 包含 `model` 类型，实现“物理隔离的语义缓存”。
+## 5. 测试与验证
 
----
+基础验证命令：
 
-## 🚀 6. 性能基准测试 (Benchmarking)
-
-### 6.1 性能预期
-- **网关开销 (Overhead)**: 纯网关处理时间（含向量计算）应控制在 **100ms** 以内。
-- **Rust 处理能力**: 正则脱敏应在 **< 1ms** 内完成。
-
-### 6.2 推荐测试工具
-使用 `hey` 进行压力测试：
 ```powershell
-hey -n 1000 -c 100 -m POST -H "Authorization: Bearer <key>" -d '{"model":"mock"}' http://localhost:8080/v1/chat/completions
+cd core-go
+$env:GOCACHE='D:\workspace\codes4\gateway\.gocache'
+go test ./...
 ```
 
----
+Proto 一致性检查：
 
-## ⚙️ 7. 开发环境与命令速查
-
-### gRPC 代码生成
 ```powershell
-# Go
-protoc --proto_path=proto --go_out=core-go --go-grpc_out=core-go proto/gateway.proto
-# Python
-cd logic-python; uv run python -m grpc_tools.protoc -I ../proto --python_out=. --grpc_python_out=. ../proto/gateway.proto
+make proto-check
 ```
 
-### 依赖同步
-- Go: `go mod tidy`
-- Python: `uv sync`
-- Rust: `cargo build`
+推荐新增代码时至少覆盖：
 
----
+- 单元测试：router、policy、provider、config、runtime。
+- 组件测试：application service、dependency facade。
+- 契约测试：proto 与跨语言接口行为。
+- 集成测试：主链路、SSE、关键降级场景。
 
-*“代码只能体现功能，而文档体现的是灵魂。”*
+## 6. 文档要求
+
+只要改动了这些边界之一，就应该同步更新对应文档：
+
+- 架构边界：[ARCHITECTURE_BOUNDARIES.md](/D:/workspace/codes4/gateway/core-go/ARCHITECTURE_BOUNDARIES.md)
+- CI 保护：[CI_ENFORCEMENT.md](/D:/workspace/codes4/gateway/core-go/CI_ENFORCEMENT.md)
+- Proto 兼容：[COMPATIBILITY.md](/D:/workspace/codes4/gateway/proto/COMPATIBILITY.md)
+- Python 契约：[SERVICE_CONTRACT.md](/D:/workspace/codes4/gateway/logic-python/SERVICE_CONTRACT.md)
+- Rust 契约：[BOUNDARY.md](/D:/workspace/codes4/gateway/utils-rust/BOUNDARY.md)
+
+## 7. 当前不建议做的事
+
+- 不要把新的编排逻辑重新塞回 `ChatHandler`。
+- 不要在多个模块重复表达同一个限流或配额规则。
+- 不要在业务层直接调用 Python / Rust client。
+- 不要绕过 proto 契约直接约定隐式字段语义。
+- 不要依赖缺失的本地文件或临时目录来让测试通过。

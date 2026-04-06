@@ -1,0 +1,18 @@
+policies:
+  - name: tool_auth
+    enabled: true
+    config: {}
+
+  - name: rate_limit
+    enabled: true
+    config:
+      backend: redis
+
+  - name: quota
+    enabled: true
+    config: {}
+
+  - name: input_guard
+    enabled: true
+    config:
+      backend: nitro_plus_python

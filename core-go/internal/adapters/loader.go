@@ -4,31 +4,28 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Registry 保存所有通过 YAML 加载的动态插件配置。
 type Registry struct {
 	Plugins map[string]PluginConfig
 }
 
-var GlobalRegistry = &Registry{
-	Plugins: make(map[string]PluginConfig),
-}
+var GlobalRegistry = &Registry{Plugins: make(map[string]PluginConfig)}
 
-// LoadPlugins 扫描目录中的 yaml/yml 文件并注册插件。
-// 对单个文件的解析失败只打印警告，不会阻塞整个网关启动。
 func (r *Registry) LoadPlugins(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			os.MkdirAll(dir, 0o755)
+			_ = os.MkdirAll(dir, 0o755)
 			return nil
 		}
 		return err
 	}
 
+	var invalid []string
 	for _, entry := range entries {
 		if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yaml" && filepath.Ext(entry.Name()) != ".yml") {
 			continue
@@ -37,25 +34,43 @@ func (r *Registry) LoadPlugins(dir string) error {
 		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
+			invalid = append(invalid, fmt.Sprintf("%s: read failed: %v", path, err))
 			continue
 		}
 
 		var cfg PluginConfig
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			fmt.Printf("警告：解析插件配置文件 %s 失败: %v\n", path, err)
+			invalid = append(invalid, fmt.Sprintf("%s: invalid yaml: %v", path, err))
 			continue
 		}
 
 		if cfg.Name == "" {
-			cfg.Name = entry.Name()
+			cfg.Name = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		}
+		if err := validatePluginConfig(cfg); err != nil {
+			invalid = append(invalid, fmt.Sprintf("%s: %v", path, err))
+			continue
 		}
 		r.Plugins[cfg.Name] = cfg
+	}
+
+	if len(invalid) > 0 {
+		return fmt.Errorf("plugin validation failed: %s", strings.Join(invalid, "; "))
 	}
 	return nil
 }
 
-// GetPlugin 按名称获取已加载的插件配置。
 func (r *Registry) GetPlugin(name string) (PluginConfig, bool) {
 	p, ok := r.Plugins[name]
 	return p, ok
+}
+
+func validatePluginConfig(cfg PluginConfig) error {
+	if strings.TrimSpace(cfg.Name) == "" {
+		return fmt.Errorf("plugin name is required")
+	}
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return fmt.Errorf("plugin base_url is required")
+	}
+	return nil
 }

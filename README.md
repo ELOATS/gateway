@@ -1,53 +1,43 @@
-# 多语言 AI 网关
+# Gateway
 
-这是一个由三层平面组成的 AI 网关系统：
+Gateway 是一个多语言 AI 网关，当前由三部分组成：
 
-- Go 编排层
-- Rust Nitro 安全与 Token 工具层
-- Python 智能增强与缓存层
+- `core-go/`：对外 HTTP 与 SSE 入口、请求编排、策略、路由、可观测性与管理接口。
+- `logic-python/`：增强能力服务，当前稳定职责是 `CheckInput`、`CheckOutput`、`GetCache`。
+- `utils-rust/`：Nitro 基础能力，当前稳定职责是输入安全检查、Token 统计与敏感规则加载。
 
-目前系统已经按“第一性原理”收敛了主链路，核心特点是：
+这套架构已经从“按功能堆叠”收敛为“按边界协作”：Go 负责主链路和装配，Python 与 Rust 通过稳定接口提供可替换能力，而不是渗透到业务编排层。
 
-- 统一的请求标准化入口
-- 统一的策略决策点
-- 统一的执行计划
-- 显式区分降级与 fail-closed
-- 显式暴露依赖健康状态、版本和失败策略
+## 当前架构摘要
 
-## 目录结构
+主链路在 `core-go` 内部被固定为几层职责：
 
-- `core-go/`
-  Go 编排层，包含 HTTP 入口、策略管线、路由、可观测性、管理接口和控制台
-- `logic-python/`
-  Python 智能层，负责语义缓存和可选增强能力
-- `utils-rust/`
-  Rust Nitro 层，负责同步安全能力和 Token 工具能力
-- `proto/`
-  跨语言 gRPC 协议
-- `k8s/`
-  Kubernetes 部署、监控资源和相关文档
+- `transport`：HTTP / SSE 适配与请求解析。
+- `application`：请求编排与用例服务。
+- `pipeline`：标准化、策略评估、计划生成、执行、审计。
+- `dependencies`：Python / Rust / 其他外部能力的统一门面。
+- `bootstrap`：启动、配置、依赖装配、健康状态初始化。
 
-## 当前系统能力
+关键实现入口：
 
-- Chat 请求已经收敛为统一的 Go pipeline，而不是散落在 middleware 和 handler 中
-- 工具鉴权、限流、配额、输入护栏、路由、输出护栏、审计都走统一热路径
-- 运行时依赖状态支持显式暴露：
-  - readiness
-  - health
-  - version
-  - failure mode
-- Prometheus 指标已新增：
-  - `gateway_readiness`
-  - `gateway_dependency_health`
-  - `gateway_dependency_required`
-  - `gateway_degraded_events_total`
-- Kubernetes 监控资源已新增：
-  - `k8s/servicemonitor.yaml`
-  - `k8s/prometheus-rules.yaml`
+- [main.go](/D:/workspace/codes4/gateway/core-go/cmd/gateway/main.go)
+- [service.go](/D:/workspace/codes4/gateway/core-go/internal/application/chat/service.go)
+- [chat.go](/D:/workspace/codes4/gateway/core-go/internal/handlers/chat.go)
+- [chat_pipeline.go](/D:/workspace/codes4/gateway/core-go/internal/pipeline/chat_pipeline.go)
+- [facade.go](/D:/workspace/codes4/gateway/core-go/internal/dependencies/facade.go)
+
+## 目录说明
+
+- `core-go/`：Go 网关主体。
+- `logic-python/`：Python gRPC 服务与增强逻辑。
+- `utils-rust/`：Rust Nitro 与 Wasm 能力。
+- `proto/`：跨语言接口定义与兼容性规则。
+- `k8s/`：Kubernetes 部署与监控资源。
+- `scripts/`：仓库级辅助脚本，例如 proto 生成物同步校验。
 
 ## 本地开发
 
-常用本地验证命令：
+最常用的验证命令：
 
 ```powershell
 cd core-go
@@ -55,37 +45,37 @@ $env:GOCACHE='D:\workspace\codes4\gateway\.gocache'
 go test ./...
 ```
 
-如果要本地直接启动整套服务，可以使用：
+Proto 生成物一致性检查：
+
+```powershell
+make proto-check
+```
+
+如果需要同时启动整套本地服务，可以使用仓库根目录的脚本：
 
 ```powershell
 .\run_all.ps1
 ```
 
-## Kubernetes 与 Minikube
+## 文档入口
 
-本地 Minikube 分步部署文档：
+- 架构边界：[ARCHITECTURE_BOUNDARIES.md](/D:/workspace/codes4/gateway/core-go/ARCHITECTURE_BOUNDARIES.md)
+- 开发指南：[DEVELOPER_GUIDE.md](/D:/workspace/codes4/gateway/DEVELOPER_GUIDE.md)
+- 代码阅读指南：[CODE_READING_GUIDE.md](/D:/workspace/codes4/gateway/CODE_READING_GUIDE.md)
+- 故障排查：[TROUBLESHOOTING_GUIDE.md](/D:/workspace/codes4/gateway/TROUBLESHOOTING_GUIDE.md)
+- Kubernetes 部署：[K8S_DEPLOYMENT_GUIDE.md](/D:/workspace/codes4/gateway/K8S_DEPLOYMENT_GUIDE.md)
+- 监控接入：[MONITORING.md](/D:/workspace/codes4/gateway/k8s/MONITORING.md)
+- Proto 兼容规则：[COMPATIBILITY.md](/D:/workspace/codes4/gateway/proto/COMPATIBILITY.md)
+- Python 服务契约：[SERVICE_CONTRACT.md](/D:/workspace/codes4/gateway/logic-python/SERVICE_CONTRACT.md)
+- Rust 边界契约：[BOUNDARY.md](/D:/workspace/codes4/gateway/utils-rust/BOUNDARY.md)
 
-- [K8S_DEPLOYMENT_GUIDE.md](/D:/workspace/codes4/gateway/K8S_DEPLOYMENT_GUIDE.md)
+## 当前维护结论
 
-监控接入说明：
+当前版本已经具备较强的模块化和较高的可维护性，原因在于：
 
-- [MONITORING.md](/D:/workspace/codes4/gateway/k8s/MONITORING.md)
+- 请求编排从 handler 下沉到 application service，边界更稳定。
+- 跨语言依赖通过 facade 收口，失败策略不再散落在业务层。
+- 配置路径集中在 `Config.Paths`，默认策略文件随仓库提供。
+- Proto 契约、文档边界与 CI 自动检查已经建立。
 
-## 监控接入摘要
-
-如果你在 Kubernetes 中使用 Prometheus Operator：
-
-1. 先部署网关工作负载
-2. 再应用 `k8s/servicemonitor.yaml`
-3. 再应用 `k8s/prometheus-rules.yaml`
-4. 最后确认 orchestration service 的 `/metrics` 已被采集
-
-## 验证
-
-当前 Go 编排层改动已通过：
-
-```powershell
-cd core-go
-$env:GOCACHE='D:\workspace\codes4\gateway\.gocache'
-go test ./...
-```
+它仍然是一个多语言系统，因此系统级维护成本高于单体 Go 服务，但主链路已经具备清晰、可扩展、可验证的工程结构。

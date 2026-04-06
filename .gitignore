@@ -21,6 +21,7 @@ utils-rust/*.txt
 logic-python/*
 !logic-python/Dockerfile
 !logic-python/README.md
+!logic-python/SERVICE_CONTRACT.md
 !logic-python/gateway_pb2.py
 !logic-python/gateway_pb2_grpc.py
 !logic-python/main.py

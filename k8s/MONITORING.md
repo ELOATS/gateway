@@ -1,97 +1,54 @@
-# AI 网关监控接入说明
+# Monitoring
 
-仓库中已经包含了将网关指标暴露给 Prometheus Operator 所需的 Kubernetes 资源。
+本文档说明当前 Gateway 的监控接入重点，以及它与架构边界的关系。
 
-## 涉及文件
+## 1. 监控目标
 
-- `k8s/servicemonitor.yaml`
-  用于抓取 Go 编排层的 `/metrics`
-- `k8s/prometheus-rules.yaml`
-  定义 readiness、依赖健康和降级事件相关告警
-- `k8s/orchestration.yaml`
-  为编排层 Service 增加了稳定标签和命名端口 `http`
-- `k8s/gateway-all-in-one.yaml`
-  在 all-in-one 部署清单中同步了相同标签和命名端口
+监控不是为了采更多指标，而是为了回答几个稳定问题：
 
-## 前提条件
+- 网关是否可用。
+- 网关是否 ready。
+- 关键依赖是否健康。
+- 当前是否处于 degraded。
+- 主链路时延、错误和失败模式是否异常。
 
-这些资源默认依赖 Prometheus Operator 或兼容套件，例如：
+## 2. 当前建议关注的对象
 
-- `kube-prometheus-stack`
+- `core-go` HTTP 服务可用性。
+- `logic-python` gRPC 可达性。
+- Rust Nitro 相关依赖状态。
+- Redis 等共享依赖。
+- 请求总量、错误率、延迟分布。
+- 降级事件和依赖健康变化。
 
-如果你的集群还不能识别 `ServiceMonitor` 或 `PrometheusRule`，请先安装监控栈。
+## 3. 接入方式
 
-## 应用顺序
+如果使用 Prometheus Operator，通常需要：
 
-先部署业务服务，再部署监控资源：
+1. 部署网关工作负载并暴露 metrics。
+2. 应用 `k8s/servicemonitor.yaml`。
+3. 应用 `k8s/prometheus-rules.yaml`。
+4. 在告警中区分“依赖不可用但允许 degraded”和“服务不可提供请求”。
 
-```bash
-kubectl apply -f k8s/base.yaml
-kubectl apply -f k8s/redis.yaml
-kubectl apply -f k8s/nitro.yaml
-kubectl apply -f k8s/intelligence.yaml
-kubectl apply -f k8s/orchestration.yaml
-kubectl apply -f k8s/servicemonitor.yaml
-kubectl apply -f k8s/prometheus-rules.yaml
-```
+## 4. 指标设计原则
 
-如果你使用合并部署清单，则顺序为：
+当前系统已经把一部分运行态信息显式化，监控设计应遵守这些边界：
 
-```bash
-kubectl apply -f k8s/gateway-all-in-one.yaml
-kubectl apply -f k8s/servicemonitor.yaml
-kubectl apply -f k8s/prometheus-rules.yaml
-```
+- 运行时状态由 observability / runtime 子系统统一表达。
+- 业务模块只上报事件，不直接决定指标命名和生命周期。
+- 依赖健康状态应可观察，但不要让指标直接替代业务降级逻辑。
 
-## ServiceMonitor 实际抓取目标
+## 5. 排查建议
 
-ServiceMonitor 会抓取：
+如果监控显示异常，先判断是哪一类：
 
-- namespace: `ai-gateway`
-- service labels:
-  - `app=orchestration`
-  - `app.kubernetes.io/name=ai-gateway`
-  - `app.kubernetes.io/component=orchestration`
-- port: `http`
-- path: `/metrics`
+- 服务本身不可用。
+- 服务可用但未 ready。
+- 请求错误率升高。
+- 某个依赖进入 degraded。
+- proto 漂移或跨语言行为不一致导致的逻辑错误。
 
-## 关键指标
+然后再回到：
 
-- `gateway_readiness`
-  当所有必需依赖健康时为 `1`，否则为 `0`
-- `gateway_dependency_health`
-  按依赖名称、状态、失败策略、版本暴露健康状态
-- `gateway_dependency_required`
-  必需依赖为 `1`，可选依赖为 `0`
-- `gateway_degraded_events_total`
-  记录系统发出的降级事件和 `fail_open_with_audit` 事件
-
-## 已包含的告警
-
-- `AIGatewayNotReady`
-  当 `gateway_readiness == 0` 持续 2 分钟触发
-- `AIGatewayRequiredDependencyDown`
-  当必需依赖持续不健康超过 2 分钟触发
-- `AIGatewayOptionalDependencyDegraded`
-  当可选依赖持续不健康超过 15 分钟触发
-- `AIGatewayDegradedAuditSpike`
-  当 10 分钟内降级事件数超过 20 时触发
-
-## 验证方法
-
-```bash
-kubectl get svc -n ai-gateway
-kubectl describe servicemonitor ai-gateway-orchestration -n ai-gateway
-kubectl describe prometheusrule ai-gateway-alerts -n ai-gateway
-```
-
-如果集群中 Prometheus Operator 已经正常运行，还应进一步确认：
-
-- Prometheus 已发现该抓取目标
-- `/metrics` 中能看到新增指标
-- 规则页中已能看到告警规则
-
-## 说明
-
-- 当前告警中的 `runbook_url` 仍是占位地址，建议替换成你自己的内部 runbook 链接
-- 如果你的 Prometheus Operator 只选择特定 label 的 `ServiceMonitor` 或 `PrometheusRule`，需要根据集群约定调整这些资源的 metadata labels
+- [TROUBLESHOOTING_GUIDE.md](/D:/workspace/codes4/gateway/TROUBLESHOOTING_GUIDE.md)
+- [ARCHITECTURE_BOUNDARIES.md](/D:/workspace/codes4/gateway/core-go/ARCHITECTURE_BOUNDARIES.md)

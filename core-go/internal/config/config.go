@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,10 +18,20 @@ type APIKeyEntry struct {
 	DailyQuota int64
 }
 
+// PathConfig collects the filesystem resources used by the gateway.
+type PathConfig struct {
+	PolicyFile         string
+	AdapterDir         string
+	SensitiveRulesFile string
+	NitroWasmFile      string
+	AuditLogFile       string
+}
+
 // Config 汇总当前网关启动所需的全部配置。
 // 其中 failure mode 字段用于显式区分安全关键依赖和可降级增强依赖。
 type Config struct {
-	Port string
+	Port  string
+	Paths PathConfig
 
 	APIKeys        []APIKeyEntry
 	RateLimitQPS   float64
@@ -76,7 +87,14 @@ func LoadConfig() *Config {
 	tokenFactor, _ := strconv.Atoi(getEnv("TOKEN_ESTIMATION_FACTOR", "4"))
 
 	return &Config{
-		Port:                    getEnv("PORT", "8080"),
+		Port: getEnv("PORT", "8080"),
+		Paths: PathConfig{
+			PolicyFile:         resolvePathEnv("GATEWAY_POLICIES_PATH", filepath.Join("configs", "policies.yaml")),
+			AdapterDir:         resolvePathEnv("GATEWAY_ADAPTERS_DIR", filepath.Join("configs", "adapters")),
+			SensitiveRulesFile: resolvePathEnv("GATEWAY_SENSITIVE_RULES_PATH", filepath.Join("configs", "sensitive.txt")),
+			NitroWasmFile:      resolvePathEnv("GATEWAY_NITRO_WASM_PATH", filepath.Join("wasm", "nitro.wasm")),
+			AuditLogFile:       getEnv("GATEWAY_AUDIT_LOG_PATH", "audit_compliance.log"),
+		},
 		APIKeys:                 ParseAPIKeys(rawKeys),
 		RateLimitQPS:            qps,
 		RateLimitBurst:          burst,
@@ -209,4 +227,41 @@ func validateFailureMode(name, value string) error {
 	default:
 		return fmt.Errorf("%s must be fail_closed or fail_open_with_audit, got %q", name, value)
 	}
+}
+
+func resolvePathEnv(envKey, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(envKey)); value != "" {
+		return resolvePath(value)
+	}
+	return resolvePath(fallback)
+}
+
+func resolvePath(candidate string) string {
+	if candidate == "" {
+		return ""
+	}
+	if filepath.IsAbs(candidate) {
+		return candidate
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return candidate
+	}
+
+	dir := wd
+	for range 8 {
+		resolved := filepath.Join(dir, candidate)
+		if _, statErr := os.Stat(resolved); statErr == nil {
+			return resolved
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return candidate
 }

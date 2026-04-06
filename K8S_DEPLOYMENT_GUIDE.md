@@ -1,257 +1,70 @@
-# AI 网关 Kubernetes / Minikube 本地部署指南
+# Kubernetes Deployment Guide
 
-本文档用于指导你在本地 Minikube 中完整部署当前版本的 AI 网关，并包含监控资源的接入步骤。
+本文档说明当前 Gateway 在 Kubernetes 上的推荐部署方式。文档重点放在当前已经稳定的边界，而不是历史版本的部署细节。
 
-## 1. 准备环境
+## 1. 部署对象
 
-请先安装以下工具：
+当前系统通常由这些工作负载组成：
 
-- Docker Desktop
-- `kubectl`
-- `minikube`
+- `core-go` 网关服务。
+- `logic-python` 增强能力服务。
+- Rust Nitro 相关能力，按当前部署方式可能内嵌或作为独立支持组件。
+- Redis 等基础依赖。
+- 监控与指标采集资源。
 
-推荐的本地集群启动参数：
+## 2. 推荐部署顺序
 
-```powershell
-minikube start --cpus=4 --memory=8192
-```
+1. 部署基础配置和 Secret。
+2. 部署 Redis 与其他共享依赖。
+3. 部署 `logic-python`。
+4. 部署 `core-go`。
+5. 部署监控资源，如 `ServiceMonitor` 和告警规则。
+6. 验证 `/healthz`、`/readyz` 与核心请求路径。
 
-确认集群可用：
+## 3. 配置原则
 
-```powershell
-kubectl get nodes
-```
+当前版本需要特别关注这些约束：
 
-## 2. 在本地构建镜像
+- 策略文件必须来自明确路径配置，不能依赖容器当前目录。
+- 可降级依赖缺失时，服务应表现为 degraded，而不是直接 panic。
+- 启动必需配置应在 Pod 启动阶段暴露错误。
+- proto 与客户端生成物必须保持同步，否则可能在运行时出现隐式兼容问题。
 
-在仓库根目录执行：
+## 4. 部署前检查
 
-```powershell
-docker build -t ai-gateway-orchestration:latest -f core-go/Dockerfile .
-docker build -t ai-gateway-intelligence:latest -f logic-python/Dockerfile .
-docker build -t ai-gateway-nitro:latest -f utils-rust/Dockerfile .
-```
-
-## 3. 将镜像加载到 Minikube
-
-```powershell
-minikube image load ai-gateway-orchestration:latest
-minikube image load ai-gateway-intelligence:latest
-minikube image load ai-gateway-nitro:latest
-```
-
-如果需要确认镜像确实进入 Minikube，可以执行：
+建议在构建镜像前先执行：
 
 ```powershell
-minikube ssh -- docker images
+cd core-go
+$env:GOCACHE='D:\workspace\codes4\gateway\.gocache'
+go test ./...
 ```
 
-## 4. 准备基础资源
-
-先部署命名空间、密钥和持久卷声明：
+以及仓库根目录：
 
 ```powershell
-kubectl apply -f k8s/base.yaml
+make proto-check
 ```
 
-如果你要修改 API Key 或其他默认密钥，建议先编辑 `k8s/base.yaml` 再执行 apply。
+## 5. 健康检查建议
 
-## 5. 部署基础设施
+建议至少配置：
 
-部署 Redis：
+- `livenessProbe` 指向 `/healthz`。
+- `readinessProbe` 指向 `/readyz`。
+- 如果依赖健康状态参与 readiness，请确认 degraded 场景与业务预期一致。
 
-```powershell
-kubectl apply -f k8s/redis.yaml
-```
+## 6. 发布后的验证
 
-等待基础设施启动完成：
+发布完成后建议检查：
 
-```powershell
-kubectl get pods -n ai-gateway -w
-```
+- 网关日志中是否正确输出依赖健康状态。
+- `logic-python` 是否能正常响应 `CheckInput`、`CheckOutput`、`GetCache`。
+- 若启用监控，Prometheus 是否成功抓取网关指标。
+- CI 保护中的 `architecture-guard` 与 `proto-sync` 是否在主分支持续通过。
 
-## 6. 部署 Nitro 和 Intelligence
+## 7. 相关文档
 
-```powershell
-kubectl apply -f k8s/nitro.yaml
-kubectl apply -f k8s/intelligence.yaml
-```
-
-继续观察 Pod 状态，直到 Rust 和 Python 服务都进入 `Running`：
-
-```powershell
-kubectl get pods -n ai-gateway -w
-```
-
-## 7. 部署 Go 编排层
-
-```powershell
-kubectl apply -f k8s/orchestration.yaml
-```
-
-等待网关 Pod 启动完成：
-
-```powershell
-kubectl get pods -n ai-gateway -w
-```
-
-## 8. 验证服务与健康状态
-
-查看 Service：
-
-```powershell
-kubectl get svc -n ai-gateway
-```
-
-获取 Minikube 可访问地址：
-
-```powershell
-minikube service orchestration-service -n ai-gateway --url
-```
-
-然后发送一个最小测试请求：
-
-```bash
-curl -X POST http://<URL>/v1/chat/completions \
-  -H "Authorization: Bearer sk-gw-default-123456" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello Minikube"}]}'
-```
-
-同时验证健康、就绪和指标接口：
-
-```bash
-curl http://<URL>/healthz
-curl http://<URL>/readyz
-curl http://<URL>/metrics
-```
-
-注意：`/readyz` 现在不再是固定返回 ready，而是会根据必需依赖的健康状态来决定返回结果。
-
-## 9. 接入监控资源
-
-这一步要求你的集群已经安装 Prometheus Operator 或兼容套件，例如 `kube-prometheus-stack`。
-
-应用监控资源：
-
-```powershell
-kubectl apply -f k8s/servicemonitor.yaml
-kubectl apply -f k8s/prometheus-rules.yaml
-```
-
-验证资源：
-
-```powershell
-kubectl describe servicemonitor ai-gateway-orchestration -n ai-gateway
-kubectl describe prometheusrule ai-gateway-alerts -n ai-gateway
-```
-
-如需更详细的监控说明，请查看：
-
-- [k8s/MONITORING.md](/D:/workspace/codes4/gateway/k8s/MONITORING.md)
-
-## 10. 本地迭代开发流程
-
-当你修改代码后，推荐使用下面的固定流程：
-
-1. 重新构建受影响镜像
-2. 重新加载到 Minikube
-3. 重启对应 Deployment
-
-### Go 改动
-
-```powershell
-docker build -t ai-gateway-orchestration:latest -f core-go/Dockerfile .
-minikube image load ai-gateway-orchestration:latest
-kubectl rollout restart deployment orchestration -n ai-gateway
-```
-
-### Python 改动
-
-```powershell
-docker build -t ai-gateway-intelligence:latest -f logic-python/Dockerfile .
-minikube image load ai-gateway-intelligence:latest
-kubectl rollout restart deployment intelligence -n ai-gateway
-```
-
-### Rust 改动
-
-```powershell
-docker build -t ai-gateway-nitro:latest -f utils-rust/Dockerfile .
-minikube image load ai-gateway-nitro:latest
-kubectl rollout restart deployment nitro -n ai-gateway
-```
-
-## 11. 常用排查命令
-
-```powershell
-kubectl get all -n ai-gateway
-kubectl logs -f deployment/orchestration -n ai-gateway
-kubectl logs -f deployment/intelligence -n ai-gateway
-kubectl logs -f deployment/nitro -n ai-gateway
-kubectl describe pod <pod-name> -n ai-gateway
-```
-
-## 12. 常见问题
-
-### Minikube 中找不到镜像
-
-重新执行：
-
-```powershell
-minikube image load <image>:latest
-```
-
-### Go 网关无法连接 Python 或 Rust
-
-检查以下文件中的 Service 名称和环境变量是否一致：
-
-- `k8s/orchestration.yaml`
-- `k8s/intelligence.yaml`
-- `k8s/nitro.yaml`
-
-再查看 orchestration 日志：
-
-```powershell
-kubectl logs -f deployment/orchestration -n ai-gateway
-```
-
-### `/readyz` 返回 not ready
-
-先查看返回内容：
-
-```bash
-curl http://<URL>/readyz
-```
-
-然后根据返回的依赖状态去检查对应 Pod 和 Service。
-
-### `ServiceMonitor` 或 `PrometheusRule` 无法识别
-
-通常说明集群中还没有安装 Prometheus Operator。
-
-## 13. 一次性完整部署摘要
-
-如果你想从头到尾完整跑一遍本地部署，可以直接按这个顺序执行：
-
-```powershell
-minikube start --cpus=4 --memory=8192
-
-docker build -t ai-gateway-orchestration:latest -f core-go/Dockerfile .
-docker build -t ai-gateway-intelligence:latest -f logic-python/Dockerfile .
-docker build -t ai-gateway-nitro:latest -f utils-rust/Dockerfile .
-
-minikube image load ai-gateway-orchestration:latest
-minikube image load ai-gateway-intelligence:latest
-minikube image load ai-gateway-nitro:latest
-
-kubectl apply -f k8s/base.yaml
-kubectl apply -f k8s/redis.yaml
-kubectl apply -f k8s/nitro.yaml
-kubectl apply -f k8s/intelligence.yaml
-kubectl apply -f k8s/orchestration.yaml
-
-# 可选：前提是已安装 Prometheus Operator
-kubectl apply -f k8s/servicemonitor.yaml
-kubectl apply -f k8s/prometheus-rules.yaml
-```
+- [MONITORING.md](/D:/workspace/codes4/gateway/k8s/MONITORING.md)
+- [ARCHITECTURE_BOUNDARIES.md](/D:/workspace/codes4/gateway/core-go/ARCHITECTURE_BOUNDARIES.md)
+- [CI_ENFORCEMENT.md](/D:/workspace/codes4/gateway/core-go/CI_ENFORCEMENT.md)

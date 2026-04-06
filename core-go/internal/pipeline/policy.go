@@ -7,27 +7,22 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/config"
-	"github.com/ai-gateway/core/internal/nitro"
+	"github.com/ai-gateway/core/internal/dependencies"
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/time/rate"
 )
 
-// Policy 定义一个策略评估步骤的统一接口。
-// 每个策略只负责判断，不持有基础设施依赖。
 type Policy interface {
 	Name() string
 	Evaluate(ctx context.Context, env *RequestEnvelope) *PolicyDecision
-	Close() // 用于在策略引擎重新加载时清理背景资源
+	Close()
 }
 
-// RegisterPolicies 将项目中所有可用的策略实现注册到引擎中。
 func RegisterPolicies() {
 	RegisterPolicy("tool_auth", func(deps *DependencyContainer, cfg map[string]any) (Policy, error) {
 		return &ToolAuthPolicy{}, nil
@@ -42,15 +37,10 @@ func RegisterPolicies() {
 	})
 
 	RegisterPolicy("input_guard", func(deps *DependencyContainer, cfg map[string]any) (Policy, error) {
-		return &InputGuardPolicy{
-			nitroClient:        deps.NitroClient,
-			intelligenceClient: deps.IntelligenceClient,
-			config:             deps.Config,
-		}, nil
+		return &InputGuardPolicy{dependencies: deps.Dependencies}, nil
 	})
 }
 
-// ToolAuthPolicy 工具级权限验证策略
 type ToolAuthPolicy struct{}
 
 func (p *ToolAuthPolicy) Name() string { return "tool_auth" }
@@ -75,7 +65,6 @@ type localLimiter struct {
 	lastSeen time.Time
 }
 
-// RateLimitPolicy 速率限制策略
 type RateLimitPolicy struct {
 	config        *config.Config
 	rdb           *redis.Client
@@ -176,7 +165,6 @@ func (rp *RateLimitPolicy) Evaluate(ctx context.Context, env *RequestEnvelope) *
 	return nil
 }
 
-// QuotaPolicy 每日调用配额策略
 type QuotaPolicy struct {
 	config *config.Config
 	rdb    *redis.Client
@@ -227,80 +215,39 @@ func (qp *QuotaPolicy) Evaluate(ctx context.Context, env *RequestEnvelope) *Poli
 	}
 }
 
-// InputGuardPolicy 输入内容安全护栏策略
+type inputGuardChecker interface {
+	CheckInput(ctx context.Context, prompt string) dependencies.InputGuardOutcome
+}
+
 type InputGuardPolicy struct {
-	nitroClient        nitro.NitroClient
-	intelligenceClient pb.AiLogicClient
-	config             *config.Config
+	dependencies inputGuardChecker
 }
 
 func (ig *InputGuardPolicy) Name() string { return "input_guard" }
 func (ig *InputGuardPolicy) Close()       {}
 func (ig *InputGuardPolicy) Evaluate(ctx context.Context, env *RequestEnvelope) *PolicyDecision {
-	prompt := env.Prompt
-
-	// Nitro 属于同步安全关键路径，默认按 fail-closed 处理。
-	if ig.nitroClient != nil {
-		nitroCtx, cancelNitro := context.WithTimeout(ctx, ig.config.GuardrailNitroTimeout)
-		defer cancelNitro()
-
-		sanitized, err := ig.nitroClient.CheckInput(nitroCtx, prompt)
-		if err != nil {
-			if strings.EqualFold(ig.config.NitroFailureMode, "fail_open_with_audit") {
-				return &PolicyDecision{
-					Allow:           true,
-					Degraded:        true,
-					DegradeReason:   "nitro input guardrail unavailable",
-					SanitizedPrompt: prompt,
-				}
-			}
-			return &PolicyDecision{
-				StatusCode: http.StatusServiceUnavailable,
-				ErrorCode:  "guardrail_unavailable",
-				Message:    "input guardrail unavailable",
-				Reason:     "nitro safety check failed",
-			}
-		}
-		prompt = sanitized
+	if ig.dependencies == nil {
+		return &PolicyDecision{Allow: true, SanitizedPrompt: env.Prompt}
 	}
 
-	if ig.intelligenceClient == nil {
-		return &PolicyDecision{Allow: true, SanitizedPrompt: prompt}
-	}
-
-	pyCtx, cancelPy := context.WithTimeout(ctx, ig.config.GuardrailIntellTimeout)
-	defer cancelPy()
-
-	// Python 输入护栏属于可配置增强能力，可按 failure mode 决定 fail-open 还是 fail-closed。
-	pyResp, err := ig.intelligenceClient.CheckInput(pyCtx, &pb.InputRequest{Prompt: prompt})
-	if err != nil {
-		if strings.EqualFold(ig.config.PythonInputFailureMode, "fail_closed") {
-			return &PolicyDecision{
-				StatusCode: http.StatusServiceUnavailable,
-				ErrorCode:  "python_guardrail_unavailable",
-				Message:    "python input guardrail unavailable",
-				Reason:     "python input guardrail failure",
-			}
-		}
-		slog.Warn("python input guardrail degraded", "request_id", env.RequestID, "error", err)
+	outcome := ig.dependencies.CheckInput(ctx, env.Prompt)
+	if !outcome.Allowed {
 		return &PolicyDecision{
-			Allow:           true,
-			Degraded:        true,
-			DegradeReason:   "python input guardrail unavailable",
-			SanitizedPrompt: prompt,
+			Allow:           false,
+			StatusCode:      outcome.StatusCode,
+			ErrorCode:       outcome.ErrorCode,
+			Message:         outcome.Message,
+			Reason:          outcome.Reason,
+			SanitizedPrompt: outcome.SanitizedPrompt,
+			Degraded:        outcome.Degraded,
+			DegradeReason:   outcome.DegradeReason,
 		}
 	}
 
-	if !pyResp.Safe {
-		return &PolicyDecision{
-			StatusCode: http.StatusForbidden,
-			ErrorCode:  "security_block",
-			Message:    pyResp.Reason,
-			Reason:     pyResp.Reason,
-		}
-	}
 	return &PolicyDecision{
 		Allow:           true,
-		SanitizedPrompt: pyResp.SanitizedPrompt,
+		SanitizedPrompt: outcome.SanitizedPrompt,
+		Degraded:        outcome.Degraded,
+		DegradeReason:   outcome.DegradeReason,
 	}
 }

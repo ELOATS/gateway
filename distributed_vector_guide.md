@@ -1,47 +1,37 @@
-# 分布式智能底座：Qdrant 向量检索实战指南
+# Distributed Vector Guide
 
-在 NITRO 2.0 中，我们将语义缓存层从单机版（Local Faiss）升级为了分布式版（Qdrant Cluster）。本指南将带您深入理解这一核心转变。
+本文档说明仓库中与向量缓存、语义命中和分布式部署相关的设计约束。当前版本不把“分布式向量系统”作为独立主链路，而把它视为 Python 增强能力的一部分。
 
-## 1. 为什么放弃 Faiss？
+## 1. 当前定位
 
-Faiss 是一款极其卓越的向量搜索库，但在构建**分布式、自动扩缩容**的网关时，它存在以下局限：
-- **无状态性冲突**: Faiss 索引需要定期保存为本地 `.index` 文件。这就要求 Python 节点必须挂载持久卷（PVC），否则重启后缓存归零。
-- **并发同步困难**: 多个 Python 实例无法实时共享彼此插入的新缓存，除非通过复杂的网络文件系统同步。
-- **功能单一**: 它是纯算法库，不具备数据库的 Metadata 过滤（Payload Filtering）和权限管控能力。
+语义缓存相关能力当前由 `logic-python` 通过 `GetCache` 提供。Go 网关只通过稳定接口消费这一能力，不直接依赖具体向量库或嵌入实现。
 
-## 2. Qdrant：云原生的向量数据库
+这意味着：
 
-Qdrant 将向量搜索从“算法”提升到了“服务”层面：
-- **API 驱动**: 通过 gRPC/HTTP 与数据库通讯，Python 逻辑层彻底变为“无状态” (Stateless)。
-- **Payload 过滤**: 在搜索向量的同时，可以指定 `model='gpt-4'` 等条件进行精准过滤。
-- **水平扩展**: Qdrant 自身支持分片与副本，支撑网关的海量请求。
+- 向量检索是增强能力，不是 Go 主链路的领域模型。
+- 语义缓存失败时，行为由 Go 端降级策略决定。
+- 分布式部署策略应优先隐藏在 Python 服务内部，而不是泄漏到 Go 编排层。
 
-## 3. 架构迁移全景
+## 2. 设计原则
 
-### 3.1 核心数据流
-`[User Prompt] -> [Sentence Transformer (Python)] -> [Vector Search (Qdrant)] -> [Logic Process]`
+如果要把向量能力扩展到更大规模，应遵守这些规则：
 
-### 3.2 关键代码对比 (Python)
+- 保持 `GetCache` 的外部语义稳定。
+- 不要让 Go 感知具体向量引擎实现差异。
+- 命中与未命中、部分错误、超时等语义必须清晰映射回 facade。
+- 如果引入分片、副本或远端向量数据库，这些都应属于 Python 服务内部实现细节。
 
-**旧版 (Faiss + Index File):**
-```python
-faiss.write_index(index, "vector.index")  # 强依赖本地磁盘
-```
+## 3. 当前建议
 
-**新版 (Qdrant Client):**
-```python
-client.upsert(
-    collection_name="cache",
-    points=[PointStruct(id=id, vector=vector, payload={"response": resp})]
-) # 进程间通讯，节点可弹性销毁
-```
+- 把缓存键语义、模型区分和命中阈值管理在 Python 服务内部。
+- 把超时、可用性与 fail-open / fail-closed 策略保留在 Go 侧。
+- 对于跨语言排查，先看 `GetCache` 契约，再看具体向量引擎。
 
-## 4. 最佳实践建议
+## 4. 与主架构的关系
 
-1. **命名空间隔离**: 利用 Qdrant 的 `collection` 隔离不同的业务域或不同版本的 Embedding 模型。
-2. **异步非阻塞**: 虽然在本演示中使用了同步客户端，但在生产环境下，建议在 Go 侧直接对接 Qdrant 减少一层 Python 透传。
-3. **向量压缩**: 对于海量缓存，可以开启 Qdrant 的标量量化 (Scalar Quantization) 以节省 4 倍以上的内存消耗。
+向量能力并不拥有请求主链路的控制权。当前主链路仍然以 Go 的 application service 与 pipeline 为中心，而不是以 Python 检索为中心。这一点在维护时必须保持。
 
----
-> [!TIP]
-> 这一升级标志着 AI Gateway 正式具备了生产级的容灾能力。即使所有 Python 处理节点宕机重启，用户的语义缓存依然稳固在集中式数据库中。
+更多约束请参考：
+
+- [SERVICE_CONTRACT.md](/D:/workspace/codes4/gateway/logic-python/SERVICE_CONTRACT.md)
+- [ARCHITECTURE_BOUNDARIES.md](/D:/workspace/codes4/gateway/core-go/ARCHITECTURE_BOUNDARIES.md)
