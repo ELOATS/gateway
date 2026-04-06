@@ -23,6 +23,8 @@ jobs:
       go: ${{ steps.filter.outputs.go }}
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
+      architecture: ${{ steps.filter.outputs.architecture }}
+      proto_sync: ${{ steps.filter.outputs.proto_sync }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v4
@@ -46,8 +48,114 @@ jobs:
               - 'logic-python/**'
               - 'proto/**'
               - '.github/workflows/ci.yml'
+            architecture:
+              - 'core-go/**'
+              - 'proto/**'
+              - 'logic-python/**'
+              - 'utils-rust/**'
+              - '.github/workflows/ci.yml'
+            proto_sync:
+              - 'proto/**'
+              - 'core-go/api/gateway/v1/**'
+              - 'logic-python/gateway_pb2.py'
+              - 'logic-python/gateway_pb2_grpc.py'
+              - 'scripts/verify_proto_sync.py'
+              - 'core-go/cmd/proto_descriptor/**'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
             docs_only:
               - '**/*.md'
+
+  architecture-guard:
+    name: Architecture Guard
+    needs: changes
+    if: needs.changes.outputs.architecture == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify boundary and contract files exist
+        shell: bash
+        run: |
+          required_files=(
+            "core-go/configs/policies.yaml"
+            "core-go/ARCHITECTURE_BOUNDARIES.md"
+            "proto/COMPATIBILITY.md"
+            "logic-python/SERVICE_CONTRACT.md"
+            "utils-rust/BOUNDARY.md"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "Missing required architecture file: $file"
+              exit 1
+            fi
+          done
+
+      - name: Verify proto contract test exists
+        shell: bash
+        run: |
+          if [[ ! -f "core-go/api/gateway/v1/gateway_contract_test.go" ]]; then
+            echo "Missing proto contract test: core-go/api/gateway/v1/gateway_contract_test.go"
+            exit 1
+          fi
+
+      - name: Summarize architecture guard coverage
+        shell: bash
+        run: |
+          echo "## Architecture Guard" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Validated boundary docs, baseline policy config, and proto contract test presence." >> "$GITHUB_STEP_SUMMARY"
+
+  proto-sync:
+    name: Proto Sync
+    needs: changes
+    if: needs.changes.outputs.proto_sync == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: core-go/go.sum
+
+      - name: Download Go modules
+        working-directory: core-go
+        run: go mod download
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: latest
+
+      - name: Sync Python env
+        working-directory: logic-python
+        run: uv sync
+
+      - name: Verify proto sync
+        working-directory: logic-python
+        run: uv run python ../scripts/verify_proto_sync.py
+
+      - name: Summarize proto sync coverage
+        if: success()
+        shell: bash
+        run: |
+          echo "## Proto Sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified that Go and Python generated descriptors match proto/gateway.proto." >> "$GITHUB_STEP_SUMMARY"
 
   go-ci:
     name: Go Core
@@ -229,6 +337,8 @@ jobs:
     name: CI Summary
     needs:
       - changes
+      - architecture-guard
+      - proto-sync
       - go-ci
       - rust-ci
       - python-ci
@@ -243,6 +353,8 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Area | Changed | Result |" >> "$GITHUB_STEP_SUMMARY"
           echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Architecture guard | ${{ needs.changes.outputs.architecture }} | ${{ needs.architecture-guard.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Proto sync | ${{ needs.changes.outputs.proto_sync }} | ${{ needs.proto-sync.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Go | ${{ needs.changes.outputs.go }} | ${{ needs.go-ci.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Rust | ${{ needs.changes.outputs.rust }} | ${{ needs.rust-ci.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Python | ${{ needs.changes.outputs.python }} | ${{ needs.python-ci.result }} |" >> "$GITHUB_STEP_SUMMARY"

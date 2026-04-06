@@ -23,8 +23,6 @@ import (
 	"google.golang.org/grpc/backoff"
 )
 
-// main 只保留“按顺序装配系统”的主流程：
-// 加载配置、初始化依赖、组装 handler/router，最后启动 HTTP 服务。
 func main() {
 	cfg := mustLoadConfig()
 
@@ -32,7 +30,7 @@ func main() {
 	slog.Info("initializing ai gateway core", "port", cfg.Port)
 
 	status := InitRuntimeStatus(cfg)
-	LoadDynamicPlugins("configs/adapters")
+	LoadDynamicPlugins(cfg.Paths.AdapterDir)
 	shutdownTracer := InitObservability(cfg)
 	defer shutdownTracer()
 
@@ -68,17 +66,16 @@ func mustLoadConfig() *config.Config {
 	return cfg
 }
 
-// InitObservability 初始化 tracing 和审计能力。
 func InitObservability(cfg *config.Config) func() {
 	shutdownTracer, err := observability.InitTracer(context.Background(), cfg.OTELCollectorAddr)
 	if err != nil {
 		slog.Warn("failed to initialize tracer", "error", err)
 	}
 
-	if err := observability.InitGlobalAuditLogger("audit_compliance.log"); err != nil {
+	if err := observability.InitGlobalAuditLogger(cfg.Paths.AuditLogFile); err != nil {
 		slog.Warn("failed to initialize audit logger", "error", err)
 	} else {
-		slog.Info("audit logger initialized", "path", "audit_compliance.log")
+		slog.Info("audit logger initialized", "path", cfg.Paths.AuditLogFile)
 	}
 
 	return shutdownTracer
@@ -101,7 +98,6 @@ func mustBuildGRPCDialOptions(cfg *config.Config) []grpc.DialOption {
 	}
 }
 
-// runHTTPServer 在后台启动 HTTP 服务，并打印关键启动信息。
 func runHTTPServer(srv *http.Server, cfg *config.Config, nitroVersion string) {
 	go func() {
 		slog.Info("ai gateway core ready",
@@ -116,7 +112,6 @@ func runHTTPServer(srv *http.Server, cfg *config.Config, nitroVersion string) {
 	}()
 }
 
-// waitForShutdown 统一处理进程信号和优雅关闭逻辑。
 func waitForShutdown(srv *http.Server) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -136,12 +131,10 @@ func waitForShutdown(srv *http.Server) {
 	}
 }
 
-// initNitro 优先尝试 Wasm Nitro；失败后再退回 gRPC Nitro。
-// 它会同步更新依赖状态，确保 readiness 和监控看到的是显式结果。
 func initNitro(cfg *config.Config, dialOpts []grpc.DialOption, status *runtime.SystemStatus) (nitro.NitroClient, string) {
-	wasmPath := "wasm/nitro.wasm"
+	wasmPath := cfg.Paths.NitroWasmFile
 	if _, err := os.Stat(wasmPath); err == nil {
-		rules, _ := os.ReadFile("configs/sensitive.txt")
+		rules, _ := os.ReadFile(cfg.Paths.SensitiveRulesFile)
 		client, wasmErr := nitro.NewWasmNitroClient(context.Background(), wasmPath, string(rules))
 		if wasmErr == nil {
 			status.Set(runtime.DependencyStatus{Name: "nitro", Required: true, Healthy: true, Status: "ready", Version: "wasm", FailureMode: cfg.NitroFailureMode})
@@ -157,8 +150,6 @@ func initNitro(cfg *config.Config, dialOpts []grpc.DialOption, status *runtime.S
 	return &nitro.GrpcNitroClient{Client: rsClient, Conn: rsConn}, "grpc"
 }
 
-// initNodes 根据配置构造上游模型节点列表。
-// 有真实 OpenAI 配置时走真实节点，否则回退到 mock 节点，便于本地开发。
 func initNodes(cfg *config.Config) []*router.ModelNode {
 	if cfg.OpenAIApiKey != "" && cfg.OpenAIApiKey != "your-openai-api-key-here" {
 		slog.Info("registering openai adapter", "model_id", "gpt-4")
@@ -208,7 +199,6 @@ func initNodes(cfg *config.Config) []*router.ModelNode {
 	}
 }
 
-// initSmartRouter 注册默认路由策略和规则策略。
 func initSmartRouter(cfg *config.Config, nodes []*router.ModelNode) (*router.SmartRouter, *router.HealthTracker) {
 	tracker := router.NewHealthTracker(cfg.HealthAlpha)
 	sr := router.NewSmartRouter(nodes, tracker, cfg.RouteStrategy)
@@ -219,22 +209,18 @@ func initSmartRouter(cfg *config.Config, nodes []*router.ModelNode) (*router.Sma
 	sr.RegisterStrategy(&router.QualityStrategy{Tracker: tracker})
 	sr.RegisterStrategy(&router.FallbackStrategy{Tracker: tracker})
 
-	sr.RegisterStrategy(router.NewRuleStrategy([]router.Rule{
-		{
-			Name:     "vip-users-to-premium-node",
-			Priority: 1,
-			Target:   "openai-primary",
-			Condition: func(ctx *router.RouteContext) bool {
-				return ctx.UserTier == "admin" || ctx.UserTier == "vip"
-			},
+	sr.RegisterStrategy(router.NewRuleStrategy([]router.Rule{{
+		Name:     "vip-users-to-premium-node",
+		Priority: 1,
+		Target:   "openai-primary",
+		Condition: func(ctx *router.RouteContext) bool {
+			return ctx.UserTier == "admin" || ctx.UserTier == "vip"
 		},
-	}))
+	}}))
 
 	return sr, tracker
 }
 
-// mustDial 用于建立关键 gRPC 连接。
-// 这里保持 fail-fast，避免服务在关键依赖缺失时以“半可用”状态启动。
 func mustDial(addr string, opts ...grpc.DialOption) (pb.AiLogicClient, *grpc.ClientConn) {
 	conn, err := grpc.Dial(addr, opts...)
 	if err != nil {

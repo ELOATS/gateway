@@ -1,14 +1,14 @@
 # AI Gateway - Multi-Plane Management Makefile
 # Targets:
-#   run     - Run all three planes locally (Go, Python, Rust)
-#   build   - Build binary artifacts for all planes
-#   proto   - Re-generate gRPC code from proto/gateway.proto
-#   clean   - Remove build artifacts and temporary files
-#   docker  - Build and start using Docker Compose
+#   run         - Run all three planes locally (Go, Python, Rust)
+#   build       - Build binary artifacts for all planes
+#   proto       - Re-generate gRPC code from proto/gateway.proto
+#   proto-check - Verify committed Go/Python generated proto artifacts match proto/gateway.proto
+#   clean       - Remove build artifacts and temporary files
+#   docker      - Build and start using Docker Compose
 
-.PHONY: run build proto clean docker
+.PHONY: run build proto proto-check clean docker
 
-# Default target
 run:
 	@echo "--- Starting AI Gateway Plane components ---"
 	@echo "[1/3] Starting Python Intelligence Plane..."
@@ -24,16 +24,17 @@ build:
 	@echo "--- Building AI Gateway artifacts ---"
 	cd core-go && go build -o bin/gateway ./cmd/gateway
 	cd utils-rust && cargo build --release
-	# Python is interpreted, but we can ensure dependencies are synced
 	cd logic-python && uv sync
 
 proto:
 	@echo "--- Regenerating gRPC stubs from proto/gateway.proto ---"
-	# Go
 	protoc --proto_path=proto --go_out=core-go --go-grpc_out=core-go proto/gateway.proto
-	# Python
 	cd logic-python && uv run python -m grpc_tools.protoc -I ../proto --python_out=. --grpc_python_out=. ../proto/gateway.proto
-	# Rust (automatically handled by build.rs/tonic-build during next cargo build)
+
+proto-check:
+	@echo "--- Verifying generated proto artifacts are in sync ---"
+	cd logic-python && uv sync
+	cd logic-python && uv run python ../scripts/verify_proto_sync.py
 
 clean:
 	@echo "--- Cleaning up artifacts ---"
@@ -46,7 +47,6 @@ docker:
 	@echo "--- Launching via Docker Compose ---"
 	docker-compose up --build
 
-# Kubernetes / Minikube targets
 k8s-build:
 	@echo "--- Building images inside Minikube's Docker env ---"
 	@echo "Make sure to run 'minikube docker-env' first!"
