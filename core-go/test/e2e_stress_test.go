@@ -18,7 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	
+
 	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/nitro"
 )
@@ -35,7 +35,7 @@ func BenchmarkFullGatewayStack(b *testing.B) {
 	}
 
 	ctx := context.Background()
-	
+
 	// Redis
 	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -44,7 +44,7 @@ func BenchmarkFullGatewayStack(b *testing.B) {
 
 	// gRPC Clients (Python/Rust)
 	connOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	
+
 	pyConn, err := grpc.Dial("localhost:50051", connOpts...)
 	if err != nil {
 		b.Fatalf("failed to connect to python intelligence service: %v", err)
@@ -82,7 +82,7 @@ func BenchmarkFullGatewayStack(b *testing.B) {
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Authorization", "Bearer sk-perf-test")
 			c.Request = r
-			
+
 			handler.HandleChatCompletions(c)
 
 			if w.Code != http.StatusOK {

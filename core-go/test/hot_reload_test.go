@@ -79,14 +79,14 @@ policies:
 	err = os.WriteFile(configPath, []byte(newConfig), 0644)
 	assert.NoError(t, err)
 
-	// Since the watcher is in engine.go and runs every 5s (wait, I should check that), 
+	// Since the watcher is in engine.go and runs every 5s (wait, I should check that),
 	// I'll manually trigger reload for the test to be faster if I can, or just wait.
-	// Actually, I'll just wait a bit longer than the ticker if possible, 
+	// Actually, I'll just wait a bit longer than the ticker if possible,
 	// or I can call e.reload() if it was exported (it's not).
-	
+
 	// Wait for the background watch to pick it up (it's 5s in engine.go)
 	fmt.Println("Waiting for policy engine to pick up change...")
-	time.Sleep(6 * time.Second) 
+	time.Sleep(6 * time.Second)
 
 	// 4. Verify no crashes occurred during transition
 	cancel()

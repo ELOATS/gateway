@@ -473,13 +473,13 @@ func (p *ChatPipeline) logAudit(env *RequestEnvelope, nodeName *string, event st
 	if env != nil {
 		record.RequestID = env.RequestID
 		record.Model = env.Model
-		
+
 		maskedKey := env.APIKey
 		if len(maskedKey) > 10 {
 			maskedKey = maskedKey[:6] + "***" + maskedKey[len(maskedKey)-4:]
 		}
 		record.APIKey = maskedKey
-		
+
 		truncatedPrompt := env.Prompt
 		if len(truncatedPrompt) > 1000 {
 			truncatedPrompt = truncatedPrompt[:1000] + "...(truncated)"
@@ -536,7 +536,7 @@ func checkRedisRateLimit(ctx context.Context, rdb *redis.Client, label string, q
 	if burst > 0 && int64(burst) > limit {
 		limit = int64(burst)
 	}
-	
+
 	randSuffix := uuid.New().String()
 
 	script := `

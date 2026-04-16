@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-
 func TestChatHandler_HandleChatCompletions_Basic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

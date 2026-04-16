@@ -24,4 +24,3 @@ func NewChatHandler(ic pb.AiLogicClient, nc nitro.NitroClient, sr *router.SmartR
 func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 	h.service.HandleChatCompletions(c)
 }
-

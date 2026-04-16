@@ -99,20 +99,20 @@ func (ht *HealthTracker) proactiveSelfHealing(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-		ht.mu.Lock()
-		for node, h := range ht.states {
-			if h.State == StateOpen {
-				// 达到冷却时间后，自动进入半开状态进行探测
-				if time.Since(h.LastFailure) > 30*time.Second {
-					oldState := h.State.String()
-					h.State = StateHalfOpen
-					h.ConsecutiveFailures = 0 // 重置计数，给一次机会
-					slog.Info("Node entered half-open probe state", "node", node, "prev_state", oldState)
-					observability.CircuitBreakerChanges.WithLabelValues(node, oldState+"->HalfOpen").Inc()
+			ht.mu.Lock()
+			for node, h := range ht.states {
+				if h.State == StateOpen {
+					// 达到冷却时间后，自动进入半开状态进行探测
+					if time.Since(h.LastFailure) > 30*time.Second {
+						oldState := h.State.String()
+						h.State = StateHalfOpen
+						h.ConsecutiveFailures = 0 // 重置计数，给一次机会
+						slog.Info("Node entered half-open probe state", "node", node, "prev_state", oldState)
+						observability.CircuitBreakerChanges.WithLabelValues(node, oldState+"->HalfOpen").Inc()
+					}
 				}
 			}
-		}
-		ht.mu.Unlock()
+			ht.mu.Unlock()
 		}
 	}
 }

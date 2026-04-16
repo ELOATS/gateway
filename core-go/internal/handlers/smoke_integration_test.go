@@ -21,7 +21,6 @@ func TestPhase4SmokeScenarios(t *testing.T) {
 		TokenEstimationFactor: 4,
 	}
 
-
 	// 2. 测试场景：流式滑动窗口审查 (Streaming Moderation)
 	// 这个需要 mock 一个 stream 给 ChatHandler，比较复杂，我们先静态验证逻辑
 	t.Run("Moderation_Blacklist_Check", func(t *testing.T) {
