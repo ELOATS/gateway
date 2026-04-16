@@ -41,33 +41,35 @@ type PolicyEngine struct {
 	configPath  string
 	deps        *DependencyContainer
 	lastModTime time.Time
+	cancel      context.CancelFunc
 }
 
 // NewPolicyEngine 从文件路径加载并初始化策略引擎，并开启自动热加载。
 func NewPolicyEngine(path string, deps *DependencyContainer) (*PolicyEngine, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	engine := &PolicyEngine{
 		configPath: path,
 		deps:       deps,
+		cancel:     cancel,
 	}
 
 	if err := engine.reload(); err != nil {
+		cancel()
 		return nil, err
 	}
 
 	// 开启背景监控
-	go engine.watch(context.Background())
+	go engine.watch(ctx)
 
 	return engine, nil
 }
 
-// reload 从文件重新加载配置。调用方需处理锁逻辑。
 func (e *PolicyEngine) reload() error {
 	info, err := os.Stat(e.configPath)
 	if err != nil {
 		return fmt.Errorf("stat config: %w", err)
 	}
 
-	// 如果文件没变，跳过
 	if info.ModTime().Equal(e.lastModTime) {
 		return nil
 	}
@@ -104,10 +106,14 @@ func (e *PolicyEngine) reload() error {
 	e.lastModTime = info.ModTime()
 	e.mu.Unlock()
 
-	// 清理旧策略占用的背景资源（例如计时器、协程）
-	for _, p := range oldChain {
-		p.Close()
-	}
+	// 异步延迟关闭旧策略，给当前活着的请求（尤其是流式请求）一个缓冲期
+	go func(old []Policy) {
+		time.Sleep(3 * time.Second)
+		for _, p := range old {
+			p.Close()
+		}
+		slog.Info("old policy plugins closed after 3s grace period")
+	}(oldChain)
 
 	slog.Info("policy engine reloaded successfully", "path", e.configPath, "policies", len(newChain))
 	return nil
@@ -209,4 +215,16 @@ func (e *PolicyEngine) GetChainNames() []string {
 		names = append(names, p.Name())
 	}
 	return names
+}
+
+// Close gracefully stops the background watcher config and policy routines.
+func (e *PolicyEngine) Close() {
+	if e.cancel != nil {
+		e.cancel()
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, p := range e.chain {
+		p.Close()
+	}
 }

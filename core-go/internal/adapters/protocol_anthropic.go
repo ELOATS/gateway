@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -93,7 +94,7 @@ type anthropicErrorResponse struct {
 }
 
 // EncodeRequest 将网关标准请求转换为 Anthropic Claude 原生格式。
-func (p *AnthropicProtocol) EncodeRequest(req *models.ChatCompletionRequest) ([]byte, http.Header, error) {
+func (p *AnthropicProtocol) EncodeRequest(ctx context.Context, req *models.ChatCompletionRequest) ([]byte, http.Header, error) {
 	ar := anthropicRequest{
 		Model:     req.Model,
 		MaxTokens: defaultMaxTokens,
@@ -175,7 +176,7 @@ func convertContentForAnthropic(content any) any {
 }
 
 // DecodeResponse 将 Anthropic 原生响应解码为网关标准格式。
-func (p *AnthropicProtocol) DecodeResponse(body io.Reader, statusCode int) (*models.ChatCompletionResponse, error) {
+func (p *AnthropicProtocol) DecodeResponse(ctx context.Context, body io.Reader, statusCode int) (*models.ChatCompletionResponse, error) {
 	if statusCode != http.StatusOK {
 		b, _ := io.ReadAll(body)
 		// 尝试解析结构化错误

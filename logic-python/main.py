@@ -3,6 +3,8 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import os
+import re
+import threading
 import uuid
 from typing import Any, Optional
 
@@ -34,15 +36,19 @@ _embedding_model: Optional[Any] = None
 _qdrant_client: Optional[QdrantClient] = None
 _prompt_detector: Optional[PromptInjectionDetector] = None
 
+_model_lock = threading.Lock()
+_qdrant_lock = threading.Lock()
+_detector_lock = threading.Lock()
 
 def get_embedding_model() -> Any:
     """按需加载 embedding 模型，避免服务启动时就拉起重依赖。"""
     global _embedding_model
     if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-
-        logger.info("loading embedding model: %s", EMBEDDING_MODEL_NAME)
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        with _model_lock:
+            if _embedding_model is None:
+                from sentence_transformers import SentenceTransformer
+                logger.info("loading embedding model: %s", EMBEDDING_MODEL_NAME)
+                _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     return _embedding_model
 
 
@@ -56,7 +62,9 @@ def get_qdrant_client() -> QdrantClient:
     """延迟初始化 Qdrant 客户端，使缓存能力成为可选增强而非启动阻塞项。"""
     global _qdrant_client
     if _qdrant_client is None:
-        _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        with _qdrant_lock:
+            if _qdrant_client is None:
+                _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
     return _qdrant_client
 
 
@@ -64,7 +72,9 @@ def get_prompt_detector() -> PromptInjectionDetector:
     """复用单例检测器，避免每次请求都重建规则和原型向量。"""
     global _prompt_detector
     if _prompt_detector is None:
-        _prompt_detector = PromptInjectionDetector(embed_fn=encode_texts)
+        with _detector_lock:
+            if _prompt_detector is None:
+                _prompt_detector = PromptInjectionDetector(embed_fn=encode_texts)
     return _prompt_detector
 
 
@@ -109,9 +119,8 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
         logger.info("[RID:%s] running input guardrails", rid)
 
         prompt = request.prompt
-        sanitized = prompt
-        if "admin@company.com" in prompt:
-            sanitized = sanitized.replace("admin@company.com", "[EMAIL_HIDDEN]")
+        # Replace basic email patterns with a placeholder to sanitize PII
+        sanitized = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '[EMAIL_HIDDEN]', prompt)
 
         detection = get_prompt_detector().inspect(prompt)
         if not detection.safe:
@@ -176,9 +185,6 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
                 )
         except Exception as exc:
             logger.error("[RID:%s] qdrant search failed: %s", rid, exc)
-
-        if "what is 1+1" in prompt.lower():
-            self._add_to_cache(prompt, "答案是 2。", target_model)
 
         return gateway_pb2.CacheResponse(hit=False)
 

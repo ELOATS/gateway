@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	pb "github.com/ai-gateway/core/api/gateway/v1"
 	"github.com/ai-gateway/core/internal/cache"
 	"github.com/ai-gateway/core/internal/config"
@@ -171,6 +173,9 @@ func (p *ChatPipeline) BuildPlan(ctx context.Context, c *gin.Context, env *Reque
 	if env.SessionID != "" && p.contextStore != nil {
 		history, err := p.contextStore.Retrieve(ctx, env.SessionID)
 		if err == nil && len(history) > 0 {
+			if len(history) > 10 {
+				history = history[len(history)-10:]
+			}
 			env.Request.Messages = append(history, env.Request.Messages...)
 			slog.Debug("session context injected", "session_id", env.SessionID, "history_len", len(history))
 		}
@@ -263,7 +268,7 @@ func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, pl
 		}
 
 		callStart := p.now()
-		resp, err := node.Adapter.ChatCompletion(env.Request)
+		resp, err := node.Adapter.ChatCompletion(ctx, env.Request)
 		callDuration := p.now().Sub(callStart)
 		if err != nil {
 			p.router.Tracker.RecordFailure(node.Name)
@@ -295,11 +300,11 @@ func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, pl
 	return nil, &PolicyDecision{StatusCode: http.StatusBadGateway, ErrorCode: "provider_error", Message: "provider execution failed", Reason: "unreachable execution state"}
 }
 
-func (p *ChatPipeline) ExecuteStream(env *RequestEnvelope, plan *ExecutionPlan, degraded bool, degradeReason string) (*ExecutionResult, *PolicyDecision) {
+func (p *ChatPipeline) ExecuteStream(ctx context.Context, env *RequestEnvelope, plan *ExecutionPlan, degraded bool, degradeReason string) (*ExecutionResult, *PolicyDecision) {
 	if plan.Cached != nil {
 		return nil, &PolicyDecision{StatusCode: http.StatusBadRequest, ErrorCode: "stream_cache_misshaped", Message: "cached responses are not available for SSE replay", Reason: "stream requests require provider streaming", Degraded: degraded}
 	}
-	stream, errCh := plan.Node.Adapter.ChatCompletionStream(env.Request)
+	stream, errCh := plan.Node.Adapter.ChatCompletionStream(ctx, env.Request)
 	return &ExecutionResult{Stream: stream, StreamErrors: errCh, Node: plan.Node, Degraded: degraded, DegradeReason: degradeReason}, nil
 }
 
@@ -467,9 +472,19 @@ func (p *ChatPipeline) logAudit(env *RequestEnvelope, nodeName *string, event st
 	record := &observability.AuditRecord{Timestamp: p.now(), Event: event, Status: status, Reason: joinReasons(reason, degradeReason), Degraded: degraded, Response: response, Tokens: tokens}
 	if env != nil {
 		record.RequestID = env.RequestID
-		record.APIKey = env.APIKey
 		record.Model = env.Model
-		record.Prompt = env.Prompt
+
+		maskedKey := env.APIKey
+		if len(maskedKey) > 10 {
+			maskedKey = maskedKey[:6] + "***" + maskedKey[len(maskedKey)-4:]
+		}
+		record.APIKey = maskedKey
+
+		truncatedPrompt := env.Prompt
+		if len(truncatedPrompt) > 1000 {
+			truncatedPrompt = truncatedPrompt[:1000] + "...(truncated)"
+		}
+		record.Prompt = truncatedPrompt
 	}
 	if nodeName != nil {
 		record.Node = *nodeName
@@ -488,10 +503,29 @@ func replaceLastMessage(req *models.ChatCompletionRequest, prompt string) {
 	if req == nil || len(req.Messages) == 0 {
 		return
 	}
-	req.Messages[len(req.Messages)-1].Content = prompt
+	last := &req.Messages[len(req.Messages)-1]
+	switch v := last.Content.(type) {
+	case string:
+		last.Content = prompt
+	case []models.ContentPart:
+		for i, p := range v {
+			if p.Type == "text" {
+				v[i].Text = prompt
+			}
+		}
+		last.Content = v
+	case []interface{}:
+		for _, p := range v {
+			if m, ok := p.(map[string]interface{}); ok {
+				if m["type"] == "text" {
+					m["text"] = prompt
+				}
+			}
+		}
+	}
 }
 
-func checkRedisRateLimit(ctx context.Context, rdb *redis.Client, label string, qps float64, _ int) (bool, error) {
+func checkRedisRateLimit(ctx context.Context, rdb *redis.Client, label string, qps float64, burst int) (bool, error) {
 	key := "rl:" + label
 	now := time.Now().UnixNano() / 1e6
 	window := int64(1000)
@@ -499,24 +533,30 @@ func checkRedisRateLimit(ctx context.Context, rdb *redis.Client, label string, q
 	if limit <= 0 {
 		limit = 1
 	}
+	if burst > 0 && int64(burst) > limit {
+		limit = int64(burst)
+	}
+
+	randSuffix := uuid.New().String()
 
 	script := `
         local key = KEYS[1]
         local now = tonumber(ARGV[1])
         local window = tonumber(ARGV[2])
         local limit = tonumber(ARGV[3])
+		local suffix = ARGV[4]
 
         redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
         local count = redis.call('ZCARD', key)
         if count >= limit then
             return 0
         else
-            redis.call('ZADD', key, now, now)
+            redis.call('ZADD', key, now, now .. ':' .. suffix)
             redis.call('PEXPIRE', key, window)
             return 1
         end
     `
-	res, err := rdb.Eval(ctx, script, []string{key}, now, window, limit).Int()
+	res, err := rdb.Eval(ctx, script, []string{key}, now, window, limit, randSuffix).Int()
 	if err != nil {
 		return false, err
 	}
@@ -611,6 +651,10 @@ func resolvePolicyPath(cfg *config.Config) string {
 }
 
 func MarshalSSEData(resp *models.ChatCompletionStreamResponse) []byte {
-	data, _ := json.Marshal(resp)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		slog.Error("failed to marshal SSE data", "error", err)
+		return []byte(`{"error":"internal marshal error"}`)
+	}
 	return data
 }

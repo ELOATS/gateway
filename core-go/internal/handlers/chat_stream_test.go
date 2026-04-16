@@ -61,11 +61,11 @@ type streamAdapter struct {
 	chunks []string
 }
 
-func (a *streamAdapter) ChatCompletion(_ *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
+func (a *streamAdapter) ChatCompletion(ctx context.Context, _ *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	return nil, nil
 }
 
-func (a *streamAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
+func (a *streamAdapter) ChatCompletionStream(ctx context.Context, req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
 	respCh := make(chan *models.ChatCompletionStreamResponse, len(a.chunks)+1)
 	errCh := make(chan error, 1)
 

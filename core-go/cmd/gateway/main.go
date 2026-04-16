@@ -45,7 +45,10 @@ func main() {
 	nitroClient, nitroVersion := initNitro(cfg, dialOpts, status)
 	defer nitroClient.Close()
 
-	sr, _ := initSmartRouter(cfg, initNodes(cfg))
+	sr, tracker := initSmartRouter(cfg, initNodes(cfg))
+	if tracker != nil {
+		defer tracker.Close()
+	}
 	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, rdb, cfg)
 	adminHandler := handlers.NewAdminHandler(sr, rdb, status)
 

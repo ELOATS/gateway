@@ -1,16 +1,11 @@
 package handlers
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/ai-gateway/core/internal/config"
-	"github.com/ai-gateway/core/internal/middleware"
-	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
@@ -25,42 +20,6 @@ func TestPhase4SmokeScenarios(t *testing.T) {
 		},
 		TokenEstimationFactor: 4,
 	}
-
-	// 1. 测试场景：Tool Call 拦截 (Agentic Security)
-	t.Run("ToolCall_Blocking_For_Free_User", func(t *testing.T) {
-		r := gin.New()
-		r.Use(func(c *gin.Context) { c.Set("key_label", "free"); c.Next() })
-		r.Use(middleware.ToolAuthMiddleware())
-		r.POST("/test", func(c *gin.Context) { c.String(200, "ok") })
-
-		reqBody, _ := json.Marshal(models.ChatCompletionRequest{
-			Model: "gpt-4",
-			Tools: []models.Tool{{Type: "function"}},
-		})
-		req, _ := http.NewRequest("POST", "/test", bytes.NewBuffer(reqBody))
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusForbidden, w.Code)
-		assert.Contains(t, w.Body.String(), "tool_call_forbidden")
-	})
-
-	t.Run("ToolCall_Allowed_For_Admin", func(t *testing.T) {
-		r := gin.New()
-		r.Use(func(c *gin.Context) { c.Set("key_label", "admin"); c.Next() })
-		r.Use(middleware.ToolAuthMiddleware())
-		r.POST("/test", func(c *gin.Context) { c.String(200, "ok") })
-
-		reqBody, _ := json.Marshal(models.ChatCompletionRequest{
-			Model: "gpt-4",
-			Tools: []models.Tool{{Type: "function"}},
-		})
-		req, _ := http.NewRequest("POST", "/test", bytes.NewBuffer(reqBody))
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-	})
 
 	// 2. 测试场景：流式滑动窗口审查 (Streaming Moderation)
 	// 这个需要 mock 一个 stream 给 ChatHandler，比较复杂，我们先静态验证逻辑

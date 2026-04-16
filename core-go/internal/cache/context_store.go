@@ -60,7 +60,7 @@ func (s *ContextStore) Append(ctx context.Context, sessionID string, msgs []mode
 func (s *ContextStore) Retrieve(ctx context.Context, sessionID string) ([]models.Message, error) {
 	key := pushContextKey(sessionID)
 
-	rawList, err := s.rdb.LRange(ctx, key, 0, -1).Result()
+	rawList, err := s.rdb.LRange(ctx, key, -10, -1).Result()
 	if err == redis.Nil {
 		return []models.Message{}, nil
 	} else if err != nil {

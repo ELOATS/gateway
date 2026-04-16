@@ -28,7 +28,7 @@ type providerSpy struct {
 	err   error
 }
 
-func (p *providerSpy) ChatCompletion(_ *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
+func (p *providerSpy) ChatCompletion(ctx context.Context, _ *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	p.calls++
 	if p.resp != nil {
 		return p.resp, p.err
@@ -48,7 +48,7 @@ func (p *providerSpy) ChatCompletion(_ *models.ChatCompletionRequest) (*models.C
 	}, p.err
 }
 
-func (p *providerSpy) ChatCompletionStream(_ *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
+func (p *providerSpy) ChatCompletionStream(ctx context.Context, _ *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
 	respCh := make(chan *models.ChatCompletionStreamResponse)
 	errCh := make(chan error, 1)
 	close(respCh)

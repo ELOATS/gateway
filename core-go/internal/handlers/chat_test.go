@@ -14,20 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestChatHandler_ExtractPrompt(t *testing.T) {
-	h := &ChatHandler{}
-	req := &models.ChatCompletionRequest{
-		Messages: []models.Message{
-			{Role: "system", Content: "You are a bot"},
-			{Role: "user", Content: "Hello world"},
-		},
-	}
-	prompt := h.extractPrompt(req)
-	if prompt != "Hello world" {
-		t.Errorf("预期 Hello world，实际 %s", prompt)
-	}
-}
-
 func TestChatHandler_HandleChatCompletions_Basic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

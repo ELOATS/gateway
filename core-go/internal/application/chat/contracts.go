@@ -23,7 +23,7 @@ type Planner interface {
 
 type Executor interface {
 	ExecuteSync(ctx context.Context, env *pipeline.RequestEnvelope, plan *pipeline.ExecutionPlan, degraded bool, degradeReason string) (*pipeline.ExecutionResult, *pipeline.PolicyDecision)
-	ExecuteStream(env *pipeline.RequestEnvelope, plan *pipeline.ExecutionPlan, degraded bool, degradeReason string) (*pipeline.ExecutionResult, *pipeline.PolicyDecision)
+	ExecuteStream(ctx context.Context, env *pipeline.RequestEnvelope, plan *pipeline.ExecutionPlan, degraded bool, degradeReason string) (*pipeline.ExecutionResult, *pipeline.PolicyDecision)
 	GuardStreamChunk(window *strings.Builder, chunk string) *pipeline.PolicyDecision
 	GuardOutputAsync(rid string, env *pipeline.RequestEnvelope, nodeName string, fullText string)
 }

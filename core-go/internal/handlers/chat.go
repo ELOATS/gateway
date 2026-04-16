@@ -7,7 +7,6 @@ import (
 	"github.com/ai-gateway/core/internal/nitro"
 	"github.com/ai-gateway/core/internal/pipeline"
 	"github.com/ai-gateway/core/internal/router"
-	"github.com/ai-gateway/core/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -24,11 +23,4 @@ func NewChatHandler(ic pb.AiLogicClient, nc nitro.NitroClient, sr *router.SmartR
 
 func (h *ChatHandler) HandleChatCompletions(c *gin.Context) {
 	h.service.HandleChatCompletions(c)
-}
-
-func (h *ChatHandler) extractPrompt(req *models.ChatCompletionRequest) string {
-	if req == nil || len(req.Messages) == 0 {
-		return ""
-	}
-	return req.Messages[len(req.Messages)-1].GetText()
 }

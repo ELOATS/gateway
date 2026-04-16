@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -63,6 +64,7 @@ type HealthTracker struct {
 	mu     sync.RWMutex
 	states map[string]*NodeHealth
 	alpha  float64
+	cancel context.CancelFunc
 }
 
 // NewHealthTracker 创建健康追踪器并开启自愈背景协程。
@@ -70,34 +72,48 @@ func NewHealthTracker(alpha float64) *HealthTracker {
 	if alpha <= 0 || alpha > 1 {
 		alpha = 0.3
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	ht := &HealthTracker{
 		states: make(map[string]*NodeHealth),
 		alpha:  alpha,
+		cancel: cancel,
 	}
-	go ht.proactiveSelfHealing()
+	go ht.proactiveSelfHealing(ctx)
 	return ht
 }
 
+// Close gracefully stops the internal routines
+func (ht *HealthTracker) Close() {
+	if ht.cancel != nil {
+		ht.cancel()
+	}
+}
+
 // proactiveSelfHealing 定期扫描熔断节点并尝试恢复。
-func (ht *HealthTracker) proactiveSelfHealing() {
+func (ht *HealthTracker) proactiveSelfHealing(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		ht.mu.Lock()
-		for node, h := range ht.states {
-			if h.State == StateOpen {
-				// 达到冷却时间后，自动进入半开状态进行探测
-				if time.Since(h.LastFailure) > 30*time.Second {
-					oldState := h.State.String()
-					h.State = StateHalfOpen
-					h.ConsecutiveFailures = 0 // 重置计数，给一次机会
-					slog.Info("节点进入半开探测状态", "node", node, "prev_state", oldState)
-					observability.CircuitBreakerChanges.WithLabelValues(node, oldState+"->HalfOpen").Inc()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ht.mu.Lock()
+			for node, h := range ht.states {
+				if h.State == StateOpen {
+					// 达到冷却时间后，自动进入半开状态进行探测
+					if time.Since(h.LastFailure) > 30*time.Second {
+						oldState := h.State.String()
+						h.State = StateHalfOpen
+						h.ConsecutiveFailures = 0 // 重置计数，给一次机会
+						slog.Info("Node entered half-open probe state", "node", node, "prev_state", oldState)
+						observability.CircuitBreakerChanges.WithLabelValues(node, oldState+"->HalfOpen").Inc()
+					}
 				}
 			}
+			ht.mu.Unlock()
 		}
-		ht.mu.Unlock()
 	}
 }
 

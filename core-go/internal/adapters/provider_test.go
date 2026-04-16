@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,7 @@ func TestOpenAIAdapter_ChatCompletion(t *testing.T) {
 			{Role: "user", Content: "Hi"},
 		},
 	}
-	resp, err := adapter.ChatCompletion(req)
+	resp, err := adapter.ChatCompletion(context.Background(), req)
 
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
@@ -51,7 +52,7 @@ func TestOpenAIAdapter_ChatCompletionStream(t *testing.T) {
 	adapter := NewOpenAIAdapter("test-key", server.URL, 5*time.Second)
 	req := &models.ChatCompletionRequest{Model: "gpt-4"}
 
-	respCh, errCh := adapter.ChatCompletionStream(req)
+	respCh, errCh := adapter.ChatCompletionStream(context.Background(), req)
 
 	var result string
 	for {
@@ -94,7 +95,7 @@ func BenchmarkOpenAI_StreamParsing(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		respCh, _ := adapter.ChatCompletionStream(req)
+		respCh, _ := adapter.ChatCompletionStream(context.Background(), req)
 		for range respCh {
 			// 抽干内容
 		}

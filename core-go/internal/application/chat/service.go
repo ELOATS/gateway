@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -76,7 +77,7 @@ func (s *Service) streamExecute(c *gin.Context, ctx context.Context, env *pipeli
 	}
 	defer s.release()
 
-	result, execDecision := s.flow.ExecuteStream(env, plan, decision.Degraded, decision.DegradeReason)
+	result, execDecision := s.flow.ExecuteStream(ctx, env, plan, decision.Degraded, decision.DegradeReason)
 	if execDecision != nil && !execDecision.Allow {
 		s.flow.RespondDecision(c, env, execDecision)
 		return
@@ -111,7 +112,8 @@ func (s *Service) streamExecute(c *gin.Context, ctx context.Context, env *pipeli
 			return
 		case err, ok := <-result.StreamErrors:
 			if ok && err != nil {
-				fmt.Fprintf(c.Writer, "data: {\"error\": \"stream_error\", \"message\": \"%s\"}\n\n", err.Error())
+				slog.Error("stream execution error", "error", err, "request_id", env.RequestID)
+				fmt.Fprintf(c.Writer, "data: {\"error\": \"stream_error\", \"message\": \"An internal error occurred during streaming.\"}\n\n")
 				flusher.Flush()
 				s.flow.RecordExecutionCompleted(env, nodeName, fullResponseBuilder.String(), chunkCount, result.Degraded, joinDegradeReasons(result.DegradeReason, "stream provider error"), "stream_error")
 				return
