@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -42,7 +43,7 @@ func TestAnthropicProtocol_EncodeRequest_Basic(t *testing.T) {
 		},
 	}
 
-	data, headers, err := p.EncodeRequest(req)
+	data, headers, err := p.EncodeRequest(context.TODO(), req)
 	require.NoError(t, err)
 
 	assert.Equal(t, "application/json", headers.Get("Content-Type"))
@@ -69,7 +70,7 @@ func TestAnthropicProtocol_EncodeRequest_SystemExtraction(t *testing.T) {
 		},
 	}
 
-	data, _, err := p.EncodeRequest(req)
+	data, _, err := p.EncodeRequest(context.TODO(), req)
 	require.NoError(t, err)
 
 	var ar anthropicRequest
@@ -90,7 +91,7 @@ func TestAnthropicProtocol_EncodeRequest_StreamHeaders(t *testing.T) {
 		},
 	}
 
-	data, headers, err := p.EncodeRequest(req)
+	data, headers, err := p.EncodeRequest(context.TODO(), req)
 	require.NoError(t, err)
 	assert.Equal(t, "text/event-stream", headers.Get("Accept"))
 
@@ -111,7 +112,7 @@ func TestAnthropicProtocol_DecodeResponse_Success(t *testing.T) {
 		"usage": {"input_tokens": 25, "output_tokens": 10}
 	}`)
 
-	resp, err := p.DecodeResponse(body, http.StatusOK)
+	resp, err := p.DecodeResponse(context.TODO(), body, http.StatusOK)
 	require.NoError(t, err)
 
 	assert.Equal(t, "msg_01XFDUDYJgAACzvnptvVoYEL", resp.ID)
@@ -133,7 +134,7 @@ func TestAnthropicProtocol_DecodeResponse_Error(t *testing.T) {
 		"error": {"type": "invalid_request_error", "message": "max_tokens is required"}
 	}`)
 
-	_, err := p.DecodeResponse(body, http.StatusBadRequest)
+	_, err := p.DecodeResponse(context.TODO(), body, http.StatusBadRequest)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max_tokens is required")
 	assert.Contains(t, err.Error(), "invalid_request_error")
@@ -163,7 +164,7 @@ func TestAnthropicProtocol_DecodeResponse_StopReasonMapping(t *testing.T) {
 				"usage": {"input_tokens": 5, "output_tokens": 1}
 			}`, tt.stopReason))
 
-			resp, err := p.DecodeResponse(body, http.StatusOK)
+			resp, err := p.DecodeResponse(context.TODO(), body, http.StatusOK)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedFinish, resp.Choices[0].FinishReason)
 		})
@@ -291,7 +292,7 @@ func TestProtocolAdapter_Anthropic_ChatCompletion(t *testing.T) {
 		},
 	}
 
-	resp, err := adapter.ChatCompletion(req)
+	resp, err := adapter.ChatCompletion(context.TODO(), req)
 	require.NoError(t, err)
 	assert.Equal(t, "msg_integration_test", resp.ID)
 	assert.Equal(t, "Hello from Claude!", resp.Choices[0].Message.GetText())
@@ -330,7 +331,7 @@ func TestProtocolAdapter_Anthropic_ChatCompletionStream(t *testing.T) {
 		},
 	}
 
-	respCh, errCh := adapter.ChatCompletionStream(req)
+	respCh, errCh := adapter.ChatCompletionStream(context.TODO(), req)
 
 	var result string
 	for {

@@ -1,6 +1,6 @@
 package router
 
-import "time"
+import "math/rand/v2"
 
 // WeightedStrategy 按节点权重分配流量，适合灰度发布和 A/B 实验。
 // 如果配置了 HealthTracker，会优先过滤不健康节点。
@@ -38,7 +38,7 @@ func (s *WeightedStrategy) Select(ctx *RouteContext, nodes []*ModelNode) *ModelN
 		return healthyNodes[0]
 	}
 
-	pick := time.Now().UnixNano() % int64(total)
+	pick := int64(rand.IntN(total))
 	var acc int64
 	for _, n := range healthyNodes {
 		acc += int64(n.Weight)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -77,7 +78,7 @@ func main() {
 	}
 
 	fmt.Println("\n[网关处理] 正在执行多模态请求分发...")
-	resp, err := adapter.ChatCompletion(req)
+	resp, err := adapter.ChatCompletion(context.Background(), req)
 	if err != nil {
 		slog.Error("演示失败", "error", err)
 		return

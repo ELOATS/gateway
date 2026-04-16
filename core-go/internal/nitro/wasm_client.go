@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -23,12 +22,11 @@ type wasmInstance struct {
 	freeString  api.Function
 }
 
-// WasmNitroClient 是基于 wazero 的本地 Nitro 实现。
-// 它通过 sync.Pool 复用多个实例，避免单实例串行化成为热点瓶颈。
 type WasmNitroClient struct {
 	runtime wazero.Runtime
 	code    wazero.CompiledModule
-	pool    sync.Pool
+	pool    chan *wasmInstance
+	rules   string
 }
 
 // NewWasmNitroClient 加载 Wasm 模块并预热一个实例。
@@ -51,25 +49,36 @@ func NewWasmNitroClient(ctx context.Context, wasmPath string, sensitiveRules str
 	client := &WasmNitroClient{
 		runtime: r,
 		code:    code,
+		pool:    make(chan *wasmInstance, 100),
+		rules:   sensitiveRules,
 	}
 
-	client.pool.New = func() any {
-		inst, err := newWasmInstance(context.Background(), r, code, sensitiveRules)
-		if err != nil {
-			panic(err)
-		}
-		return inst
-	}
-
-	inst, err := newWasmInstance(ctx, r, code, sensitiveRules)
+	inst, err := client.getInstance(ctx)
 	if err != nil {
 		_ = code.Close(ctx)
 		_ = r.Close(ctx)
 		return nil, err
 	}
-	client.pool.Put(inst)
+	client.putInstance(inst)
 
 	return client, nil
+}
+
+func (c *WasmNitroClient) getInstance(ctx context.Context) (*wasmInstance, error) {
+	select {
+	case inst := <-c.pool:
+		return inst, nil
+	default:
+		return newWasmInstance(ctx, c.runtime, c.code, c.rules)
+	}
+}
+
+func (c *WasmNitroClient) putInstance(inst *wasmInstance) {
+	select {
+	case c.pool <- inst:
+	default:
+		_ = inst.module.Close(context.Background())
+	}
 }
 
 // newWasmInstance 实例化一个新的 Wasm 模块，并在创建时完成规则同步。
@@ -81,7 +90,7 @@ func newWasmInstance(ctx context.Context, runtime wazero.Runtime, code wazero.Co
 
 	inst := &wasmInstance{
 		module:      mod,
-		malloc:      mod.ExportedFunction("malloc"),
+		malloc:      mod.ExportedFunction("nitro_malloc"),
 		freePtr:     mod.ExportedFunction("free_ptr"),
 		setRules:    mod.ExportedFunction("set_sensitive_rules_wasm"),
 		countTokens: mod.ExportedFunction("count_tokens_wasm"),
@@ -112,8 +121,11 @@ func syncRulesInst(ctx context.Context, inst *wasmInstance, rules string) error 
 }
 
 func (c *WasmNitroClient) CheckInput(ctx context.Context, prompt string) (string, error) {
-	inst := c.pool.Get().(*wasmInstance)
-	defer c.pool.Put(inst)
+	inst, err := c.getInstance(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer c.putInstance(inst)
 
 	pPtr, pLen, err := copyStringToWasm(ctx, inst, prompt)
 	if err != nil {
@@ -181,8 +193,11 @@ func freeWasmPtr(ctx context.Context, inst *wasmInstance, ptr uint64, size uint3
 }
 
 func (c *WasmNitroClient) CountTokens(ctx context.Context, model, text string) (int, error) {
-	inst := c.pool.Get().(*wasmInstance)
-	defer c.pool.Put(inst)
+	inst, err := c.getInstance(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer c.putInstance(inst)
 
 	mPtr, mLen, err := copyStringToWasm(ctx, inst, model)
 	if err != nil {

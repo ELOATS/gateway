@@ -31,7 +31,7 @@ pub static BPE_R50K: Lazy<CoreBPE> =
     Lazy::new(|| r50k_base().expect("failed to initialize r50k_base"));
 
 #[no_mangle]
-pub extern "C" fn malloc(size: usize) -> *mut u8 {
+pub extern "C" fn nitro_malloc(size: usize) -> *mut u8 {
     let layout = std::alloc::Layout::from_size_align(size, 1).unwrap();
     unsafe { std::alloc::alloc(layout) }
 }
@@ -55,9 +55,11 @@ pub unsafe extern "C" fn set_sensitive_rules_wasm(rules_ptr: *const c_char) {
     if let Ok(new_rules) = serde_json::from_str::<Vec<SensitiveRule>>(&rules_str) {
         let compiled: Vec<CompiledRule> = new_rules
             .into_iter()
-            .map(|rule| CompiledRule {
-                pattern: Regex::new(&rule.pattern).unwrap_or_else(|_| Regex::new("error").unwrap()),
-                replacement: rule.replacement,
+            .filter_map(|rule| {
+                Regex::new(&rule.pattern).ok().map(|pattern| CompiledRule {
+                    pattern,
+                    replacement: rule.replacement,
+                })
             })
             .collect();
 

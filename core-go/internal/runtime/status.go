@@ -38,10 +38,10 @@ func NewSystemStatus() *SystemStatus {
 // Set 会覆盖指定依赖的当前状态，并同步刷新对应的 Prometheus 指标。
 func (s *SystemStatus) Set(dep DependencyStatus) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if prev, ok := s.Dependencies[dep.Name]; ok {
 		observability.RemoveDependencyStatus(prev.Name, prev.Status, prev.FailureMode, prev.Version)
 	}
-	defer s.mu.Unlock()
 	s.Dependencies[dep.Name] = dep
 	observability.RecordDependencyStatus(dep.Name, dep.Status, dep.FailureMode, dep.Version, dep.Required, dep.Healthy)
 	observability.RecordGatewayReadiness(s.readyLocked())

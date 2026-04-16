@@ -4,6 +4,7 @@ package adapters
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,8 +15,8 @@ import (
 
 // Provider 定义不同 AI 提供者需要实现的统一调用接口。
 type Provider interface {
-	ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error)
-	ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error)
+	ChatCompletion(ctx context.Context, req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error)
+	ChatCompletionStream(ctx context.Context, req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error)
 }
 
 // ProviderType 表示当前支持的 provider 类型。
@@ -98,13 +99,13 @@ func NewOpenAIAdapter(apiKey, url string, timeout time.Duration) *ProtocolAdapte
 }
 
 // ChatCompletion 发起一次非流式聊天补全请求。
-func (a *ProtocolAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
-	data, headers, err := a.Protocol.EncodeRequest(req)
+func (a *ProtocolAdapter) ChatCompletion(ctx context.Context, req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
+	data, headers, err := a.Protocol.EncodeRequest(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", a.URL, bytes.NewBuffer(data))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", a.URL, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -123,7 +124,7 @@ func (a *ProtocolAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mo
 	}
 	defer resp.Body.Close()
 
-	result, err := a.Protocol.DecodeResponse(resp.Body, resp.StatusCode)
+	result, err := a.Protocol.DecodeResponse(ctx, resp.Body, resp.StatusCode)
 	if err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
@@ -131,7 +132,7 @@ func (a *ProtocolAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*mo
 }
 
 // ChatCompletionStream 发起 SSE 流式补全请求，并逐行转成标准 chunk 输出。
-func (a *ProtocolAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
+func (a *ProtocolAdapter) ChatCompletionStream(ctx context.Context, req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
 	respCh := make(chan *models.ChatCompletionStreamResponse)
 	errCh := make(chan error, 1)
 
@@ -140,13 +141,13 @@ func (a *ProtocolAdapter) ChatCompletionStream(req *models.ChatCompletionRequest
 		defer close(errCh)
 
 		req.Stream = true
-		data, headers, err := a.Protocol.EncodeRequest(req)
+		data, headers, err := a.Protocol.EncodeRequest(ctx, req)
 		if err != nil {
 			errCh <- fmt.Errorf("encode request: %w", err)
 			return
 		}
 
-		httpReq, _ := http.NewRequest("POST", a.URL, bytes.NewBuffer(data))
+		httpReq, _ := http.NewRequestWithContext(ctx, "POST", a.URL, bytes.NewBuffer(data))
 		for k, v := range headers {
 			httpReq.Header[k] = v
 		}
@@ -169,24 +170,29 @@ func (a *ProtocolAdapter) ChatCompletionStream(req *models.ChatCompletionRequest
 
 		reader := bufio.NewReader(resp.Body)
 		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err != io.EOF {
-					errCh <- err
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					if err != io.EOF {
+						errCh <- err
+					}
+					return
 				}
-				break
-			}
 
-			streamResp, isDone, err := a.Protocol.DecodeStreamChunk(line)
-			if err != nil {
-				// 上游偶发坏行不直接中断整条流
-				continue
-			}
-			if isDone {
-				break
-			}
-			if streamResp != nil {
-				respCh <- streamResp
+				streamResp, isDone, err := a.Protocol.DecodeStreamChunk(line)
+				if err != nil {
+					// 上游偶发坏行不直接中断整条流
+					continue
+				}
+				if isDone {
+					return
+				}
+				if streamResp != nil {
+					respCh <- streamResp
+				}
 			}
 		}
 	}()
@@ -200,7 +206,7 @@ type MockAdapter struct {
 }
 
 // ChatCompletion 生成一个固定结构的模拟响应。
-func (a *MockAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
+func (a *MockAdapter) ChatCompletion(ctx context.Context, req *models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	return &models.ChatCompletionResponse{
 		ID:      fmt.Sprintf("mock-%s-%d", a.Name, time.Now().Unix()),
 		Object:  "chat.completion",
@@ -225,7 +231,7 @@ func (a *MockAdapter) ChatCompletion(req *models.ChatCompletionRequest) (*models
 }
 
 // ChatCompletionStream 生成一个分块输出的模拟流式响应。
-func (a *MockAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
+func (a *MockAdapter) ChatCompletionStream(ctx context.Context, req *models.ChatCompletionRequest) (<-chan *models.ChatCompletionStreamResponse, <-chan error) {
 	respCh := make(chan *models.ChatCompletionStreamResponse)
 	errCh := make(chan error, 1)
 
@@ -235,23 +241,28 @@ func (a *MockAdapter) ChatCompletionStream(req *models.ChatCompletionRequest) (<
 
 		chunks := []string{"你好", "，", "我是", "一个", "来自", "网关", "的", "流式", "响应", "。"}
 		for i, text := range chunks {
-			respCh <- &models.ChatCompletionStreamResponse{
-				ID:      fmt.Sprintf("mock-stream-%d", time.Now().Unix()),
-				Created: time.Now().Unix(),
-				Model:   req.Model,
-				Choices: []models.StreamChoice{
-					{
-						Index: 0,
-						Delta: models.ChoiceDelta{Content: text},
-					},
-				},
-			}
-			if i == len(chunks)-1 {
+			select {
+			case <-ctx.Done():
+				return
+			default:
 				respCh <- &models.ChatCompletionStreamResponse{
-					Choices: []models.StreamChoice{{Index: 0, FinishReason: "stop"}},
+					ID:      fmt.Sprintf("mock-stream-%d", time.Now().Unix()),
+					Created: time.Now().Unix(),
+					Model:   req.Model,
+					Choices: []models.StreamChoice{
+						{
+							Index: 0,
+							Delta: models.ChoiceDelta{Content: text},
+						},
+					},
 				}
+				if i == len(chunks)-1 {
+					respCh <- &models.ChatCompletionStreamResponse{
+						Choices: []models.StreamChoice{{Index: 0, FinishReason: "stop"}},
+					}
+				}
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 

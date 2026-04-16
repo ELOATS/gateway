@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 
@@ -92,11 +93,15 @@ func (h *AdminHandler) UpdateNodeWeight(c *gin.Context) {
 
 	nodes := h.router.GetNodes()
 	found := false
+	var newNodes []*router.ModelNode
 	for _, n := range nodes {
 		if n.Name == nodeName {
-			n.Weight = weight
+			clone := *n
+			clone.Weight = weight
+			newNodes = append(newNodes, &clone)
 			found = true
-			break
+		} else {
+			newNodes = append(newNodes, n)
 		}
 	}
 
@@ -105,7 +110,7 @@ func (h *AdminHandler) UpdateNodeWeight(c *gin.Context) {
 		return
 	}
 
-	h.router.UpdateNodes(nodes)
+	h.router.UpdateNodes(newNodes)
 	c.JSON(http.StatusOK, gin.H{"status": "success", "node": nodeName, "new_weight": weight})
 }
 
@@ -119,6 +124,11 @@ func (h *AdminHandler) ResetQuota(c *gin.Context) {
 	targetKey := c.PostForm("api_key")
 	if targetKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing_api_key"})
+		return
+	}
+
+	if matched, _ := regexp.MatchString(`^[a-zA-Z0-9_\-]+$`, targetKey); !matched {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_api_key_format"})
 		return
 	}
 

@@ -1,12 +1,12 @@
 package adapters
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"text/template"
+	"strings"
 	"time"
 
 	"github.com/ai-gateway/core/pkg/models"
@@ -34,12 +34,8 @@ func (p *DynamicProtocol) AuthHeaders(apiKey string) http.Header {
 	headers := make(http.Header)
 	// 允许插件通过模板渲染动态 Header，例如 Authorization: Bearer {{.Key}}。
 	for k, tplStr := range p.Plugin.RequestMapping.HeaderTemplate {
-		tmpl, err := template.New(k).Parse(tplStr)
-		if err == nil {
-			var b bytes.Buffer
-			tmpl.Execute(&b, map[string]string{"Key": apiKey})
-			headers.Set(k, b.String())
-		}
+		rendered := strings.ReplaceAll(tplStr, "{{.Key}}", apiKey)
+		headers.Set(k, rendered)
 	}
 	// 补齐默认 Header。
 	for k, v := range p.Plugin.DefaultHeaders {
@@ -50,7 +46,7 @@ func (p *DynamicProtocol) AuthHeaders(apiKey string) http.Header {
 	return headers
 }
 
-func (p *DynamicProtocol) EncodeRequest(req *models.ChatCompletionRequest) ([]byte, http.Header, error) {
+func (p *DynamicProtocol) EncodeRequest(ctx context.Context, req *models.ChatCompletionRequest) ([]byte, http.Header, error) {
 	// 先把标准 OpenAI 结构转成 map，再叠加插件要求的额外字段。
 	reqData, err := json.Marshal(req)
 	if err != nil {
@@ -79,7 +75,7 @@ func (p *DynamicProtocol) EncodeRequest(req *models.ChatCompletionRequest) ([]by
 	return finalData, headers, nil
 }
 
-func (p *DynamicProtocol) DecodeResponse(body io.Reader, statusCode int) (*models.ChatCompletionResponse, error) {
+func (p *DynamicProtocol) DecodeResponse(ctx context.Context, body io.Reader, statusCode int) (*models.ChatCompletionResponse, error) {
 	if statusCode != http.StatusOK {
 		b, _ := io.ReadAll(body)
 		return nil, fmt.Errorf("dynamic plugin error (%d): %s", statusCode, string(b))

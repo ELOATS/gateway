@@ -53,24 +53,28 @@ class PromptInjectionDetector:
         if not normalized:
             return DetectionResult(safe=True)
 
+        # 采用加权评分逻辑，提高检测鲁棒性
+        # Regex 命中基础分 0.5，关键词命中的组数每组 0.2
+        # 若总分超过 0.8 则判定为攻击
+        total_score = 0.0
+
         for rule in self._regex_rules:
             if rule.search(normalized):
-                return DetectionResult(
-                    safe=False,
-                    reason="安全拦截：检测到潜在的 Prompt Injection 攻击。",
-                    score=1.0,
-                )
+                total_score += 0.5
+                break  # Regex 命中一次即可，作为强信号
 
         keyword_hits = 0
         for group in self._keyword_groups:
             if any(keyword in normalized for keyword in group):
                 keyword_hits += 1
 
-        if keyword_hits >= 2:
+        total_score += keyword_hits * 0.2
+
+        if total_score >= 0.8:
             return DetectionResult(
                 safe=False,
-                reason="安全拦截：检测到潜在的 Prompt Injection 攻击。",
-                score=0.9,
+                reason=f"安全拦截：检测到高风险 Prompt Injection 模式 (score: {total_score:.2f})",
+                score=min(total_score, 1.0),
             )
 
         if self._embed_fn and self._prototype_vectors:

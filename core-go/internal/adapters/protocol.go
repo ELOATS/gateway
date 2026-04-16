@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context"
 	"io"
 	"net/http"
 
@@ -15,10 +16,10 @@ import (
 // 而非传输层的差异。这让 Adapter 可以完全不感知 provider 身份。
 type ProviderProtocol interface {
 	// EncodeRequest 将网关标准请求编码为 provider 原生格式的数据流。
-	EncodeRequest(req *models.ChatCompletionRequest) ([]byte, http.Header, error)
+	EncodeRequest(ctx context.Context, req *models.ChatCompletionRequest) ([]byte, http.Header, error)
 
 	// DecodeResponse 将 provider 原生响应解码为网关标准格式。
-	DecodeResponse(body io.Reader, statusCode int) (*models.ChatCompletionResponse, error)
+	DecodeResponse(ctx context.Context, body io.Reader, statusCode int) (*models.ChatCompletionResponse, error)
 
 	// DecodeStreamChunk 将 provider 原生流式 chunk 解码为网关标准流数据块。
 	// isDone 返回 true 表示收到流结束信号。

@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -65,7 +66,7 @@ func TestDynamicAdapter_ChatCompletion(t *testing.T) {
 		},
 	}
 
-	resp, err := adapter.ChatCompletion(req)
+	resp, err := adapter.ChatCompletion(context.Background(), req)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, "I see the image!", resp.Choices[0].Message.GetText())

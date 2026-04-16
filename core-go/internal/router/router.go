@@ -42,7 +42,7 @@ func (sr *SmartRouter) RegisterStrategy(s Strategy) {
 	sr.mu.Lock()
 	sr.strategies[s.Name()] = s
 	sr.mu.Unlock()
-	slog.Info("路由策略已注册", "strategy", s.Name())
+	slog.Info("Route strategy registered", "strategy", s.Name())
 }
 
 // Route 是统一的路由入口。
@@ -62,7 +62,7 @@ func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNoStrategy, strategyName)
 	}
 
-	slog.Info("路由策略选定", "request_id", ctx.RequestID, "strategy", strategyName)
+	slog.Info("Route strategy selected", "request_id", ctx.RequestID, "strategy", strategyName)
 	node := strategy.Select(ctx, active)
 
 	if node == nil && strategyName != "fallback" {
@@ -70,13 +70,13 @@ func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
 		fallback, exists := sr.strategies["fallback"]
 		sr.mu.RUnlock()
 		if exists {
-			slog.Warn("主策略无结果，回退到 fallback", "request_id", ctx.RequestID, "strategy", strategyName)
+			slog.Warn("Main strategy yielded no result, reverting to fallback", "request_id", ctx.RequestID, "strategy", strategyName)
 			node = fallback.Select(ctx, active)
 		}
 	}
 
 	if node == nil {
-		slog.Warn("所有策略都未选出节点，使用第一个可用节点兜底", "request_id", ctx.RequestID)
+		slog.Warn("No strategy returned a node, falling back to first available", "request_id", ctx.RequestID)
 		node = active[0]
 	}
 
@@ -86,7 +86,7 @@ func (sr *SmartRouter) Route(ctx *RouteContext) (*ModelNode, error) {
 // UpdateNodes 使用 CoW 方式替换整个节点快照。
 func (sr *SmartRouter) UpdateNodes(nodes []*ModelNode) {
 	sr.nodes.Store(nodes)
-	slog.Info("模型节点列表已更新", "count", len(nodes))
+	slog.Info("Model nodes updated", "count", len(nodes))
 }
 
 // filterNodesSnap 在只读快照上执行过滤，不修改原始节点列表。
@@ -127,8 +127,10 @@ func (sr *SmartRouter) GetStrategies() []string {
 // resolveStrategy 根据请求头中的 hint 或默认值选择最终策略名。
 func (sr *SmartRouter) resolveStrategy(ctx *RouteContext) string {
 	if hint := ctx.Header("X-Route-Strategy"); hint != "" {
-		if _, ok := sr.strategies[hint]; ok {
-			return hint
+		if ctx.UserTier == "admin" || ctx.UserTier == "premium" {
+			if _, ok := sr.strategies[hint]; ok {
+				return hint
+			}
 		}
 	}
 	return sr.defaultName

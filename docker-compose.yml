@@ -10,6 +10,7 @@ services:
       - PORT=8080
       - PYTHON_ADDR=intelligence:50051
       - RUST_ADDR=nitro:50052
+      - REDIS_ADDR=redis:6379
       - GATEWAY_API_KEY=${GATEWAY_API_KEY:-sk-gw-default-123456}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:

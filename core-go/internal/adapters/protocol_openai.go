@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,7 +20,7 @@ func (p *OpenAIProtocol) AuthHeaders(apiKey string) http.Header {
 	return h
 }
 
-func (p *OpenAIProtocol) EncodeRequest(req *models.ChatCompletionRequest) ([]byte, http.Header, error) {
+func (p *OpenAIProtocol) EncodeRequest(ctx context.Context, req *models.ChatCompletionRequest) ([]byte, http.Header, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal request: %w", err)
@@ -36,7 +37,7 @@ func (p *OpenAIProtocol) EncodeRequest(req *models.ChatCompletionRequest) ([]byt
 	return data, headers, nil
 }
 
-func (p *OpenAIProtocol) DecodeResponse(body io.Reader, statusCode int) (*models.ChatCompletionResponse, error) {
+func (p *OpenAIProtocol) DecodeResponse(ctx context.Context, body io.Reader, statusCode int) (*models.ChatCompletionResponse, error) {
 	if statusCode != http.StatusOK {
 		b, _ := io.ReadAll(body)
 		return nil, fmt.Errorf("provider error (status %d): %s", statusCode, string(b))
