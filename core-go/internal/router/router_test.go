@@ -9,9 +9,9 @@ import (
 
 func makeNodes() []*ModelNode {
 	return []*ModelNode{
-		{Name: "cheap", ModelID: "m1", Weight: 20, CostPer1K: 0.001, Quality: 0.5, Enabled: true, Tags: map[string]string{"tier": "economy"}},
-		{Name: "balanced", ModelID: "m2", Weight: 60, CostPer1K: 0.01, Quality: 0.8, Enabled: true, Tags: map[string]string{"tier": "standard"}},
-		{Name: "premium", ModelID: "m3", Weight: 20, CostPer1K: 0.03, Quality: 0.95, Enabled: true, Tags: map[string]string{"tier": "premium"}},
+		{Name: "cheap", ModelID: "gpt-4", Weight: 20, CostPer1K: 0.001, Quality: 0.5, Enabled: true, Tags: map[string]string{"tier": "economy"}},
+		{Name: "balanced", ModelID: "gpt-4", Weight: 60, CostPer1K: 0.01, Quality: 0.8, Enabled: true, Tags: map[string]string{"tier": "standard"}},
+		{Name: "premium", ModelID: "gpt-4", Weight: 20, CostPer1K: 0.03, Quality: 0.95, Enabled: true, Tags: map[string]string{"tier": "premium"}},
 	}
 }
 
@@ -209,6 +209,10 @@ func TestHealthTracker_UnhealthyOnHighErrorRate(t *testing.T) {
 
 func TestSmartRouter_Route_Default(t *testing.T) {
 	nodes := makeNodes()
+	// 把所有节点设为同一个 model id 以便主流程测试
+	for _, n := range nodes {
+		n.ModelID = "gpt-4"
+	}
 	tracker := NewHealthTracker(0.3)
 	sr := NewSmartRouter(nodes, tracker, "weighted")
 	sr.RegisterStrategy(&WeightedStrategy{})
@@ -224,6 +228,9 @@ func TestSmartRouter_Route_Default(t *testing.T) {
 
 func TestSmartRouter_Route_HeaderOverride(t *testing.T) {
 	nodes := makeNodes()
+	for _, n := range nodes {
+		n.ModelID = "gpt-4"
+	}
 	tracker := NewHealthTracker(0.3)
 	sr := NewSmartRouter(nodes, tracker, "weighted")
 	sr.RegisterStrategy(&WeightedStrategy{})
@@ -232,6 +239,7 @@ func TestSmartRouter_Route_HeaderOverride(t *testing.T) {
 	ctx := &RouteContext{
 		RequestID: "test",
 		Model:     "gpt-4",
+		UserTier:  "admin",
 		Headers:   map[string]string{"X-Route-Strategy": "quality"},
 	}
 

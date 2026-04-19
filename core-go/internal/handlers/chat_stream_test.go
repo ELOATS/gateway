@@ -113,7 +113,9 @@ func newStreamingHandler(t *testing.T, chunks []string) *ChatHandler {
 		&fakeAiLogicClient{},
 		nitro.NitroClient(&fakeNitroClient{}),
 		sr,
-		nil,
+		nil, // tm
+		nil, // ce
+		nil, // rdb
 		&config.Config{
 			RequestTimeout:         5 * time.Second,
 			TokenCountTimeout:      time.Second,

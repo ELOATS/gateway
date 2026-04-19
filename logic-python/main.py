@@ -41,7 +41,11 @@ _qdrant_lock = threading.Lock()
 _detector_lock = threading.Lock()
 
 def get_embedding_model() -> Any:
-    """按需加载 embedding 模型，避免服务启动时就拉起重依赖。"""
+    """按需加载 Embedding 模型（如 SentenceTransformer）。
+    
+    设计意图：Embedding 模型通常体积庞大且占用显存/内存较高。采取延迟加载（Lazy Loading）策略可以有效缩短
+    gRPC 服务的冷启动时间。只有当第一个缓存查询或语义检测请求到达时，才会真正拉起神经网络模型。
+    """
     global _embedding_model
     if _embedding_model is None:
         with _model_lock:
@@ -59,7 +63,11 @@ def encode_texts(texts: list[str]) -> list[list[float]]:
 
 
 def get_qdrant_client() -> QdrantClient:
-    """延迟初始化 Qdrant 客户端，使缓存能力成为可选增强而非启动阻塞项。"""
+    """按需初始化 Qdrant 向量数据库客户端。
+    
+    设计意图：将语义缓存能力设计为“可选增强”。如果 Qdrant 服务暂时不可用，网关整体仍能通过 
+    Go 主链路正常路由，仅会损失缓存加速效果，这种解耦确保了系统的高可用性。
+    """
     global _qdrant_client
     if _qdrant_client is None:
         with _qdrant_lock:
@@ -103,23 +111,30 @@ def get_request_id(context: grpc.ServicerContext) -> str:
 
 
 class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
-    """Python 智能增强服务。
-
-    这里承载的能力默认都应当是“可降级”的：即使不可用，也不能破坏 Go 主链路的基础正确性。
+    """Python 智能逻辑增强服务。
+    
+    架构定位：本服务属于网关的“逻辑侧挂”（Sidecar Service）。它承载的语义缓存、提示词注入检测（Prompt Injection）
+    以及内容脱敏等功能，在设计上被视为“次要关键路径”。
+    
+    这意味着：如果本服务崩溃或由于计算密集导致超时，Go 网关会根据配置进入 `fail_open` 或 `fail_closed` 
+    模式，从而在安全与可用性之间实现动态平衡。
     """
 
     def CheckInput(
         self, request: gateway_pb2.InputRequest, context: grpc.ServicerContext
     ) -> gateway_pb2.InputResponse:
-        """执行轻量输入护栏。
-
-        这里保留基础规则和可选语义检测；真正的关键护栏仍由 Go/Rust 主链路兜底。
+        """执行输入流的安全审计与脱敏。
+        
+        逻辑流：
+        1. 执行 PII (个人隐私信息) 脱敏，如隐藏邮箱地址。
+        2. 调用 PromptInjectionDetector 进行启发式与语义双重检测。
+        3. 返回拦截决策或清洗后的提示词。
         """
         rid = get_request_id(context)
         logger.info("[RID:%s] running input guardrails", rid)
 
         prompt = request.prompt
-        # Replace basic email patterns with a placeholder to sanitize PII
+        # 使用占位符替换基础邮箱模式以脱敏 PII
         sanitized = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '[EMAIL_HIDDEN]', prompt)
 
         detection = get_prompt_detector().inspect(prompt)
@@ -147,9 +162,12 @@ class AiLogicServicer(gateway_pb2_grpc.AiLogicServicer):
     def GetCache(
         self, request: gateway_pb2.CacheRequest, context: grpc.ServicerContext
     ) -> gateway_pb2.CacheResponse:
-        """按模型维度查询语义缓存。
-
-        缓存命中属于性能增强，不应改变请求是否被允许执行的主语义。
+        """按模型维度检索语义缓存。
+        
+        检索原理：
+        1. 使用 SentenceTransformer 将当前提问转化为高维向量。
+        2. 在 Qdrant 指定集合中执行相似度搜索。
+        3. 仅当相似度超过 0.85 阈值且模型匹配时，判定为缓存命中，返回对应的 Response。
         """
         rid = get_request_id(context)
         prompt = request.prompt

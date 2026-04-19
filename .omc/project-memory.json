@@ -1,0 +1,200 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1776495052659,
+  "projectRoot": "d:\\workspace\\codes4\\gateway",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "requirements.txt"
+        ]
+      },
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "make build",
+    "testCommand": "make test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "scripts",
+      "src"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "configs": {
+      "path": "configs",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1776495052623,
+      "keyFiles": [
+        "policies.yaml",
+        "sensitive.txt"
+      ]
+    },
+    "core-go": {
+      "path": "core-go",
+      "purpose": null,
+      "fileCount": 13,
+      "lastAccessed": 1776495052625,
+      "keyFiles": [
+        "ARCHITECTURE_BOUNDARIES.md",
+        "audit_compliance.log",
+        "CI_ENFORCEMENT.md",
+        "Dockerfile",
+        "full_test_fail.log"
+      ]
+    },
+    "k8s": {
+      "path": "k8s",
+      "purpose": null,
+      "fileCount": 9,
+      "lastAccessed": 1776495052626,
+      "keyFiles": [
+        "base.yaml",
+        "gateway-all-in-one.yaml",
+        "intelligence.yaml",
+        "MONITORING.md",
+        "nitro.yaml"
+      ]
+    },
+    "logic-python": {
+      "path": "logic-python",
+      "purpose": null,
+      "fileCount": 13,
+      "lastAccessed": 1776495052627,
+      "keyFiles": [
+        "Dockerfile",
+        "gateway_pb2.py",
+        "gateway_pb2_grpc.py",
+        "main.py",
+        "prompt_injection.py"
+      ]
+    },
+    "output": {
+      "path": "output",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1776495052628,
+      "keyFiles": []
+    },
+    "proto": {
+      "path": "proto",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1776495052629,
+      "keyFiles": [
+        "COMPATIBILITY.md",
+        "gateway.proto"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1776495052629,
+      "keyFiles": [
+        "verify_proto_sync.py"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 1,
+      "lastAccessed": 1776495052630,
+      "keyFiles": [
+        "lib.rs"
+      ]
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1776495052631,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "tmp": {
+      "path": "tmp",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1776495052632,
+      "keyFiles": []
+    },
+    "utils-rust": {
+      "path": "utils-rust",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1776495052632,
+      "keyFiles": [
+        "BOUNDARY.md",
+        "build.rs",
+        "Cargo.lock",
+        "Cargo.toml",
+        "Dockerfile"
+      ]
+    },
+    "core-go\\api": {
+      "path": "core-go\\api",
+      "purpose": "API routes",
+      "fileCount": 0,
+      "lastAccessed": 1776495052634,
+      "keyFiles": []
+    },
+    "logic-python\\bin": {
+      "path": "logic-python\\bin",
+      "purpose": "Executable scripts",
+      "fileCount": 7,
+      "lastAccessed": 1776495052635,
+      "keyFiles": [
+        "f2py.exe",
+        "httpx.exe",
+        "numpy-config.exe"
+      ]
+    },
+    "utils-rust\\src": {
+      "path": "utils-rust\\src",
+      "purpose": "Source code",
+      "fileCount": 3,
+      "lastAccessed": 1776495052638,
+      "keyFiles": [
+        "lib.rs",
+        "main.rs",
+        "slm_scanner.rs"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

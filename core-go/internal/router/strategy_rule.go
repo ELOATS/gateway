@@ -5,21 +5,23 @@ import (
 	"sort"
 )
 
-// Rule 描述一条可命中的路由规则。
-// 当 Condition 返回 true 时，请求会优先路由到 Target 对应的节点。
+// Rule 描述一条静态路由规则。
+// 当 Condition 返回 true 时，流量会强制导向 Target 指定的物理节点名。
 type Rule struct {
-	Name      string                       // 规则名称，便于日志和调试。
-	Condition func(ctx *RouteContext) bool // 规则命中条件。
-	Target    string                       // 目标节点名称。
-	Priority  int                          // 优先级，数值越小越先匹配。
+	Name      string                       // 规则描述名称，用于审计日志输出。
+	Condition func(ctx *RouteContext) bool // 匹配函数，可根据 UserTier、Prompt 等字段编写。
+	Target    string                       // 命中后强制选中的后端节点名称。
+	Priority  int                          // 执行优先级，数值越小越优先判定（0 为最高）。
 }
 
-// RuleStrategy 按优先级依次匹配规则，第一条命中的规则决定路由目标。
+// RuleStrategy 实现基于业务规则的强制路由（IF-THEN 逻辑）。
+// 此策略适用于处理特例请求，如：特定用户强制使用 GPT-4，或特定 Prompt 强制由本地 Llama 处理。
 type RuleStrategy struct {
 	rules []Rule
 }
 
-// NewRuleStrategy 会先复制并排序规则，避免调用方后续修改切片影响运行时行为。
+// NewRuleStrategy 构造并根据优先级预对规则进行排序。
+// 设计意图：预排序可以极大地提高单次 Route 调用的性能，避免在主请求路径上重复排序。
 func NewRuleStrategy(rules []Rule) *RuleStrategy {
 	sorted := make([]Rule, len(rules))
 	copy(sorted, rules)

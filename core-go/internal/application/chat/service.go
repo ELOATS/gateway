@@ -3,23 +3,30 @@ package chat
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ai-gateway/core/internal/config"
+	"github.com/ai-gateway/core/internal/middleware"
 	"github.com/ai-gateway/core/internal/observability"
 	"github.com/ai-gateway/core/internal/pipeline"
 	"github.com/gin-gonic/gin"
 )
 
+// Service 是聊天补全业务的核心协调器（Orchestrator）。
+// 它负责在 HTTP 传输层与复杂的 RequestFlow 引擎之间建立桥梁，处理并发控制、上下文生命周期管理以及最终响应的封装。
 type Service struct {
-	flow      Flow
-	config    *config.Config
-	semaphore chan struct{}
+	flow      Flow           // 业务流程引擎，负责具体的策略判定、路由与执行
+	config    *config.Config // 系统级全局配置
+	semaphore chan struct{}  // 并发控制信号量，防止过大的瞬时流量压垮后端
 }
 
+// NewService 构造 Service 实例。
+// 它根据配置中的 MaxConcurrentRequests 初始化信号量。如果未配置，默认限制为 1000。
 func NewService(flow Flow, cfg *config.Config) *Service {
 	limit := cfg.MaxConcurrentRequests
 	if limit <= 0 {
@@ -32,11 +39,49 @@ func NewService(flow Flow, cfg *config.Config) *Service {
 	}
 }
 
+// HandleChatCompletions 是 OpenAI 兼容接口 /v1/chat/completions 的处理入口。
+// 该方法体现了网关的“流水线”设计模式：
+// 1. 协议标准化（Normalize）：将 rawBody 转为内部信封模型 Envelope。
+// 2. 预置策略评估（EvaluatePolicies）：执行 Auth、RateLimit、Quota 等不涉及核心路由的策略。
+// 3. 构建执行计划（BuildPlan）：根据路由规则决定使用哪个供应商物理节点，并处理潜在的降级方案。
+// 4. 分支执行：根据是否是 Stream 请求进入不同的执行路径。
 func (s *Service) HandleChatCompletions(c *gin.Context) {
 	start := time.Now()
-	env, decision := s.flow.Normalize(c, start)
+
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_payload", "message": "Failed to read request body"})
+		return
+	}
+
+	var tenantID uint
+	var apiKeyID uint
+	if tID, exists := c.Get("tenant_id"); exists {
+		if val, ok := tID.(uint); ok {
+			tenantID = val
+		}
+	}
+	if akID, exists := c.Get("api_key_id"); exists {
+		if val, ok := akID.(uint); ok {
+			apiKeyID = val
+		}
+	}
+
+	meta := &pipeline.RequestMetadata{
+		Headers: map[string]string{
+			middleware.HeaderXRequestID: c.GetString(middleware.RequestIDKey),
+			"X-Session-ID":              c.GetHeader("X-Session-ID"),
+			"X-Route-Strategy":          c.GetHeader("X-Route-Strategy"),
+			"X-Internal-API-Key":        c.GetString("api_key"),
+			"X-Internal-Key-Label":      c.GetString("key_label"),
+		},
+		TenantID: tenantID,
+		APIKeyID: apiKeyID,
+	}
+
+	env, decision := s.flow.Normalize(c.Request.Context(), rawBody, meta, start)
 	if decision != nil {
-		s.flow.RespondDecision(c, env, decision)
+		s.RespondDecision(c, env, decision)
 		return
 	}
 
@@ -44,18 +89,18 @@ func (s *Service) HandleChatCompletions(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(ctx, s.config.RequestTimeout)
 	defer cancel()
 
-	decision = s.flow.EvaluatePolicies(c, ctx, env)
+	decision = s.flow.EvaluatePolicies(ctx, env)
 	if !decision.Allow {
-		s.flow.RespondDecision(c, env, decision)
+		s.RespondDecision(c, env, decision)
 		return
 	}
 	if decision.Degraded {
 		s.flow.RecordDegraded(env, "", decision.DegradeReason)
 	}
 
-	plan, planDecision := s.flow.BuildPlan(ctx, c, env)
+	plan, planDecision := s.flow.BuildPlan(ctx, env, meta)
 	if planDecision != nil && !planDecision.Allow {
-		s.flow.RespondDecision(c, env, planDecision)
+		s.RespondDecision(c, env, planDecision)
 		return
 	}
 	if planDecision != nil && planDecision.Degraded {
@@ -79,7 +124,7 @@ func (s *Service) streamExecute(c *gin.Context, ctx context.Context, env *pipeli
 
 	result, execDecision := s.flow.ExecuteStream(ctx, env, plan, decision.Degraded, decision.DegradeReason)
 	if execDecision != nil && !execDecision.Allow {
-		s.flow.RespondDecision(c, env, execDecision)
+		s.RespondDecision(c, env, execDecision)
 		return
 	}
 
@@ -115,7 +160,8 @@ func (s *Service) streamExecute(c *gin.Context, ctx context.Context, env *pipeli
 				slog.Error("stream execution error", "error", err, "request_id", env.RequestID)
 				fmt.Fprintf(c.Writer, "data: {\"error\": \"stream_error\", \"message\": \"An internal error occurred during streaming.\"}\n\n")
 				flusher.Flush()
-				s.flow.RecordExecutionCompleted(env, nodeName, fullResponseBuilder.String(), chunkCount, result.Degraded, joinDegradeReasons(result.DegradeReason, "stream provider error"), "stream_error")
+				promptTokens := len(env.Prompt) / 4 // Simple heuristic if not available
+				s.flow.RecordExecutionCompleted(env, nodeName, fullResponseBuilder.String(), promptTokens, chunkCount, result.Degraded, joinDegradeReasons(result.DegradeReason, "stream provider error"), "stream_error")
 				return
 			}
 		case streamResp, ok := <-result.Stream:
@@ -129,7 +175,8 @@ func (s *Service) streamExecute(c *gin.Context, ctx context.Context, env *pipeli
 						observability.TPS.WithLabelValues(env.Request.Model, nodeName).Observe(float64(chunkCount) / duration)
 					}
 				}
-				s.flow.RecordExecutionCompleted(env, nodeName, fullResponseBuilder.String(), chunkCount, result.Degraded, result.DegradeReason, "stream_completed")
+				promptTokens := len(env.Prompt) / 4
+				s.flow.RecordExecutionCompleted(env, nodeName, fullResponseBuilder.String(), promptTokens, chunkCount, result.Degraded, result.DegradeReason, "stream_completed")
 				s.flow.GuardOutputAsync(env.RequestID, env, nodeName, fullResponseBuilder.String())
 				return
 			}
@@ -148,7 +195,8 @@ func (s *Service) streamExecute(c *gin.Context, ctx context.Context, env *pipeli
 				if moderationDecision := s.flow.GuardStreamChunk(&moderationWindow, content); moderationDecision != nil {
 					fmt.Fprintf(c.Writer, "data: {\"error\": \"%s\", \"message\": \"%s\"}\n\n", moderationDecision.ErrorCode, moderationDecision.Message)
 					flusher.Flush()
-					s.flow.RecordStreamBlocked(env, nodeName, fullResponseBuilder.String(), moderationDecision.Reason, result.Degraded, result.DegradeReason, chunkCount)
+					promptTokens := len(env.Prompt) / 4
+					s.flow.RecordStreamBlocked(env, nodeName, fullResponseBuilder.String(), moderationDecision.Reason, result.Degraded, result.DegradeReason, promptTokens, chunkCount)
 					return
 				}
 			}
@@ -167,7 +215,7 @@ func (s *Service) routeAndExecute(c *gin.Context, ctx context.Context, env *pipe
 
 	result, execDecision := s.flow.ExecuteSync(ctx, env, plan, decision.Degraded, decision.DegradeReason)
 	if execDecision != nil && !execDecision.Allow {
-		s.flow.RespondDecision(c, env, execDecision)
+		s.RespondDecision(c, env, execDecision)
 		return
 	}
 
@@ -192,7 +240,8 @@ func (s *Service) routeAndExecute(c *gin.Context, ctx context.Context, env *pipe
 	if len(result.Response.Choices) > 0 {
 		responseText = result.Response.Choices[0].Message.GetText()
 	}
-	s.flow.RecordExecutionCompleted(env, nodeName, responseText, result.Response.Usage.TotalTokens, result.Degraded, result.DegradeReason, statusLabel)
+	s.flow.RecordExecutionCompleted(env, nodeName, responseText, result.Response.Usage.PromptTokens, result.Response.Usage.CompletionTokens, result.Degraded, result.DegradeReason, statusLabel)
+
 
 	c.JSON(http.StatusOK, result.Response)
 }
@@ -220,4 +269,38 @@ func joinDegradeReasons(parts ...string) string {
 		reasons = append(reasons, part)
 	}
 	return strings.Join(reasons, "; ")
+}
+
+// RespondDecision 统一处理返回给客户端的错误和拦截决策
+func (s *Service) RespondDecision(c *gin.Context, env *pipeline.RequestEnvelope, decision *pipeline.PolicyDecision) {
+	if decision == nil {
+		return
+	}
+	if decision.Allow && decision.StatusCode == 0 {
+		return
+	}
+
+	if decision.RetryAfter != "" {
+		c.Header("Retry-After", decision.RetryAfter)
+	}
+
+	model := "unknown"
+	if env != nil && env.Model != "" {
+		model = env.Model
+	}
+	observability.RequestsTotal.WithLabelValues(strconv.Itoa(decision.StatusCode), model).Inc()
+
+	payload := gin.H{"error": decision.ErrorCode}
+	if decision.Message != "" {
+		payload["message"] = decision.Message
+	}
+	if decision.Reason != "" {
+		payload["reason"] = decision.Reason
+	}
+	if env != nil && env.RequestID != "" {
+		payload["request_id"] = env.RequestID
+	}
+
+	s.flow.RecordRejected(env, decision)
+	c.JSON(decision.StatusCode, payload)
 }

@@ -9,11 +9,12 @@ pub struct ScannerResult {
     pub text: String,
 }
 
-/// SlmScanner 定义基于小型语言模型的深度脱敏抽象。
+/// SlmScanner 定义了基于小型语言模型（SLM）或命名实体识别（NER）的深度安全扫描抽象接口。
 ///
-/// 这个接口定位在“正则规则之后的补充层”：
-/// 1. 未来可以接入本地 NER/分类模型，识别无固定模式的敏感片段。
-/// 2. 当前网关主链路不依赖它，因此它更适合作为增强能力逐步演进。
+/// 设计意图：
+/// 它定位于 Nitro 引擎的“增强层”，作为传统正则表达式脱敏的补充：
+/// 1. 深度识别：利用 NLP 模型（如 BERT 或轻量级 Transformer）识别那些无法通过正则固化模式匹配的敏感信息（如上下文相关的地址、自定义实体）。
+/// 2. 插件化架构：当前保留接口定义与 Mock 实现，确保网关主链路在不引入底层依赖的前提下具备“即插即用”的扩展能力。
 pub trait SlmScanner: Send + Sync {
     /// scan 分析输入文本，返回识别到的敏感实体列表。
     fn scan(&self, text: &str) -> Result<Vec<ScannerResult>, Box<dyn Error>>;

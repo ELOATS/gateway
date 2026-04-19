@@ -2,10 +2,11 @@ package router
 
 import "math/rand/v2"
 
-// WeightedStrategy 按节点权重分配流量，适合灰度发布和 A/B 实验。
-// 如果配置了 HealthTracker，会优先过滤不健康节点。
+// WeightedStrategy 实现加权随机路由逻辑。
+// 它非常适合用于 A/B 测试或灰度发布，通过配置不同的 Weight 值来控制流量配比。
+// 此外，它集成了 HealthTracker，会自动剔除由于网络或认证问题导致不健康的节点。
 type WeightedStrategy struct {
-	Tracker *HealthTracker
+	Tracker *HealthTracker // 可选的健康状态追踪器
 }
 
 func (s *WeightedStrategy) Name() string { return "weighted" }
@@ -25,7 +26,8 @@ func (s *WeightedStrategy) Select(ctx *RouteContext, nodes []*ModelNode) *ModelN
 		}
 	}
 
-	// 如果全部节点都不健康，则退化到全量候选，尽量保持服务可用。
+	// 容灾处理：如果所有节点被 HealthTracker 标记为故障。
+	// 为了保证服务的最大可用性（Best-effort），我们会退化到使用全量候选节点，防止因追踪器误判导致完全无法服务。
 	if len(healthyNodes) == 0 {
 		healthyNodes = nodes
 		total = 0

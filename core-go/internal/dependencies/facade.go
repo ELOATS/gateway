@@ -10,42 +10,52 @@ import (
 	"github.com/ai-gateway/core/internal/nitro"
 )
 
+// InputGuardOutcome 描述输入安全检查的最终结论。
+// 它包含是否允许请求、经过脱敏后的 Prompt，以及在被拦截或降级时的元数据。
 type InputGuardOutcome struct {
-	Allowed         bool
-	SanitizedPrompt string
-	StatusCode      int
-	ErrorCode       string
-	Message         string
-	Reason          string
-	Degraded        bool
-	DegradeReason   string
+	Allowed         bool   // 是否允许请求通过
+	SanitizedPrompt string // 经过过滤/脱敏后的 Prompt
+	StatusCode      int    // 因安全原因拒绝时的 HTTP 响应码
+	ErrorCode       string // 因安全原因拒绝时的错误码
+	Message         string // 返回给用户的错误消息
+	Reason          string // 内部记录的拦截详情（包含敏感原始词等）
+	Degraded        bool   // 安全检查过程中是否触发了组件降级
+	DegradeReason   string // 降级发生的具体原因
 }
 
+// OutputGuardOutcome 描述输出安全检查的最终结论。
 type OutputGuardOutcome struct {
-	Allowed       bool
-	SanitizedText string
-	StatusCode    int
-	ErrorCode     string
-	Message       string
-	Reason        string
-	Degraded      bool
-	DegradeReason string
+	Allowed       bool   // 是否允许输出通过
+	SanitizedText string // 经过过滤/脱敏后的输出文本
+	StatusCode    int    // 因安全原因拒绝时的 HTTP 响应码
+	ErrorCode     string // 因安全原因拒绝时的错误码
+	Message       string // 返回给用户的错误消息
+	Reason        string // 内部记录的拦截详情
+	Degraded      bool   // 输出层降级通常意味着审计失败但按配置“开路”放行
+	DegradeReason string // 降级发生的具体原因
 }
 
+// CacheOutcome 描述语义缓存检索的结果。
 type CacheOutcome struct {
-	Hit           bool
-	Response      string
-	HardFailure   bool
-	Degraded      bool
-	DegradeReason string
+	Hit           bool   // 是否命中缓存
+	Response      string // 缓存的响应内容
+	HardFailure   bool   // 是否发生致命错误（需中断请求）
+	Degraded      bool   // 缓存检索是否降级
+	DegradeReason string // 降级原因
 }
 
+// Facade 是网关内部复杂的依赖协调者。
+// 
+// 设计方案：
+// 它封装了与 Nitro Wasm 核心、Python Sidecar (gRPC) 以及各 Cloud Provider 之间的交互。
+// 主要目的是将 Pipeline 逻辑与具体的底层实现（如本地 Wasm 执行还是远端 gRPC 调用）解耦。
 type Facade struct {
-	intelligenceClient pb.AiLogicClient
-	nitroClient        nitro.NitroClient
+	intelligenceClient pb.AiLogicClient // 远程智能服务（Python/Rust 容器）
+	nitroClient        nitro.NitroClient // 本地 Nitro 核心（通常基于 Wasm）
 	config             *config.Config
 }
 
+// NewFacade 创建一个新的 Facade 实例。
 func NewFacade(ic pb.AiLogicClient, nc nitro.NitroClient, cfg *config.Config) *Facade {
 	return &Facade{
 		intelligenceClient: ic,
@@ -54,14 +64,20 @@ func NewFacade(ic pb.AiLogicClient, nc nitro.NitroClient, cfg *config.Config) *F
 	}
 }
 
+// IntelligenceClient 返回远程智能服务客户端。
 func (f *Facade) IntelligenceClient() pb.AiLogicClient {
 	return f.intelligenceClient
 }
 
+// NitroClient 返回本地 Nitro 核心客户端。
 func (f *Facade) NitroClient() nitro.NitroClient {
 	return f.nitroClient
 }
 
+// CheckInput 执行多层级的输入内容安全检查。
+// 流程：
+// 1. 本地 Nitro 护栏预审（低延迟）。
+// 2. 远程 Python Sidecar 深度分析（检测注入、越狱等复杂攻击）。
 func (f *Facade) CheckInput(ctx context.Context, prompt string) InputGuardOutcome {
 	sanitizedPrompt := prompt
 
@@ -129,6 +145,7 @@ func (f *Facade) CheckInput(ctx context.Context, prompt string) InputGuardOutcom
 	return InputGuardOutcome{Allowed: true, SanitizedPrompt: pyResp.SanitizedPrompt}
 }
 
+// CheckOutput 执行同步的输出内容安全审计。
 func (f *Facade) CheckOutput(ctx context.Context, text string) OutputGuardOutcome {
 	if text == "" || f.intelligenceClient == nil {
 		return OutputGuardOutcome{Allowed: true, SanitizedText: text}
@@ -165,6 +182,7 @@ func (f *Facade) CheckOutput(ctx context.Context, text string) OutputGuardOutcom
 	return outcome
 }
 
+// GetCache 尝试从远程智能服务获取语义缓存结果。
 func (f *Facade) GetCache(ctx context.Context, prompt, model string) CacheOutcome {
 	if f.intelligenceClient == nil {
 		return CacheOutcome{}

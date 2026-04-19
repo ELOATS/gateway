@@ -12,14 +12,14 @@ import (
 	"github.com/ai-gateway/core/pkg/models"
 )
 
-// AnthropicProtocol 实现了网关标准请求与 Anthropic Claude API 原生格式的双向映射。
+// AnthropicProtocol 实现了网关标准协议与 Anthropic Claude API 原生格式之间的双向映射转换。
 //
-// Claude API 与 OpenAI 的核心差异：
-//   - 鉴权使用 x-api-key 而非 Bearer token
-//   - system prompt 不在 messages 数组中，而是顶层 "system" 字段
-//   - max_tokens 为必填项
-//   - 响应结构：content 为数组，stop_reason 替代 finish_reason
-//   - 流式使用 event: content_block_delta 事件类型
+// Claude API 与 OpenAI 的核心差异及映射策略：
+//   - 鉴权机制：使用 HTTP Header `x-api-key` 而非标准的 `Bearer` token。
+//   - 系统提示词：Claude 要求 System Prompt 必须独立于 Messages 数组，放置在顶层的 "system" 字段中。
+//   - 字段约束：`max_tokens` 在 Claude API 中是强制必填项，而 OpenAI 为可选。
+//   - 响应格式：文本内容包装在 `content` 数组中，且使用 `stop_reason` 字段替代 `finish_reason`。
+//   - 流式传输：使用复杂的事件驱动模式（如 `content_block_delta`），需要状态机式的解析。
 type AnthropicProtocol struct{}
 
 const (
@@ -43,6 +43,13 @@ type anthropicRequest struct {
 	System    string             `json:"system,omitempty"`
 	Messages  []anthropicMessage `json:"messages"`
 	Stream    bool               `json:"stream,omitempty"`
+	Tools     []anthropicTool    `json:"tools,omitempty"`
+}
+
+type anthropicTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	InputSchema any    `json:"input_schema"`
 }
 
 type anthropicMessage struct {
@@ -62,8 +69,11 @@ type anthropicResponse struct {
 }
 
 type anthropicContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string         `json:"type"`
+	Text  string         `json:"text,omitempty"`
+	ID    string         `json:"id,omitempty"`
+	Name  string         `json:"name,omitempty"`
+	Input map[string]any `json:"input,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -76,8 +86,9 @@ type anthropicStreamEvent struct {
 	Type  string `json:"type"`
 	Index int    `json:"index,omitempty"`
 	Delta *struct {
-		Type string `json:"type,omitempty"`
-		Text string `json:"text,omitempty"`
+		Type string         `json:"type,omitempty"`
+		Text string         `json:"text,omitempty"`
+		PartialJson string `json:"partial_json,omitempty"`
 	} `json:"delta,omitempty"`
 	ContentBlock *anthropicContent  `json:"content_block,omitempty"`
 	Message      *anthropicResponse `json:"message,omitempty"`
@@ -101,7 +112,8 @@ func (p *AnthropicProtocol) EncodeRequest(ctx context.Context, req *models.ChatC
 		Stream:    req.Stream,
 	}
 
-	// Anthropic 要求 system 消息不在 messages 数组中，而是放在顶层字段。
+	// 核心映射逻辑：分离 System Prompt。
+	// Anthropic 强制要求对话历史中不能包含 'system' 角色的消息，必须提取到顶层字段。
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
 			ar.System = msg.GetText()
@@ -115,7 +127,21 @@ func (p *AnthropicProtocol) EncodeRequest(ctx context.Context, req *models.ChatC
 		ar.Messages = append(ar.Messages, am)
 	}
 
-	// 如果没有非 system 消息，补一个空 user 消息以满足 API 约束。
+	// 转换 Tool 定义
+	if len(req.Tools) > 0 {
+		for _, t := range req.Tools {
+			if t.Type == "function" {
+				ar.Tools = append(ar.Tools, anthropicTool{
+					Name:        t.Function.Name,
+					Description: t.Function.Description,
+					InputSchema: t.Function.Parameters,
+				})
+			}
+		}
+	}
+
+	// 鲁棒性处理：如果请求中只有 system 消息导致 messages 为空，
+	// 补入一条空 user 消息以规避 Anthropic API 的校验错误（400）。
 	if len(ar.Messages) == 0 {
 		ar.Messages = append(ar.Messages, anthropicMessage{
 			Role:    "user",
@@ -195,9 +221,20 @@ func (p *AnthropicProtocol) DecodeResponse(ctx context.Context, body io.Reader, 
 
 	// 将 Anthropic content 数组合并为单个文本响应。
 	var textBuilder strings.Builder
+	var toolCalls []models.ToolCall
 	for _, c := range ar.Content {
 		if c.Type == "text" {
 			textBuilder.WriteString(c.Text)
+		} else if c.Type == "tool_use" {
+			args, _ := json.Marshal(c.Input)
+			toolCalls = append(toolCalls, models.ToolCall{
+				ID:   c.ID,
+				Type: "function",
+				Function: models.ToolFunction{
+					Name:      c.Name,
+					Arguments: string(args),
+				},
+			})
 		}
 	}
 
@@ -212,8 +249,9 @@ func (p *AnthropicProtocol) DecodeResponse(ctx context.Context, body io.Reader, 
 			{
 				Index: 0,
 				Message: models.Message{
-					Role:    "assistant",
-					Content: textBuilder.String(),
+					Role:      "assistant",
+					Content:   textBuilder.String(),
+					ToolCalls: toolCalls,
 				},
 				FinishReason: finishReason,
 			},
@@ -226,15 +264,15 @@ func (p *AnthropicProtocol) DecodeResponse(ctx context.Context, body io.Reader, 
 	}, nil
 }
 
-// DecodeStreamChunk 将 Anthropic SSE 事件行解码为网关标准流式 chunk。
+// DecodeStreamChunk 解析 Anthropic 复杂的事件驱动 SSE 数据。
 //
-// Anthropic 的 SSE 事件类型：
-//   - message_start: 携带消息元数据 (id, model)
-//   - content_block_start: 新内容块开始
-//   - content_block_delta: 增量文本内容（主要的文本产出事件）
-//   - content_block_stop: 内容块结束
-//   - message_delta: 消息级别的增量（stop_reason 等）
-//   - message_stop: 流结束信号
+// 事件流状态机映射：
+//   - message_start: 初始化事件，携带请求 ID 和模型 ID，用于建立上下文。
+//   - content_block_start: 标志一个新内容块的开启（文本或工具调用）。
+//   - content_block_delta: 投递核心增量数据。这是由于 Claude 支持多模态，数据可能在多个 Block 中并行产生。
+//   - content_block_stop: 标志当前 Block 的结束。
+//   - message_delta: 传递消息级别的元数据（如 Token 统计、停止原因）。
+//   - message_stop: 触发 SSE 连接关闭。
 func (p *AnthropicProtocol) DecodeStreamChunk(line string) (*models.ChatCompletionStreamResponse, bool, error) {
 	line = strings.TrimSpace(line)
 
