@@ -12,8 +12,8 @@ import (
 // AuditRecord 定义一条完整的审计日志项。
 // 包含请求元数据、安全检测结果、路由信息以及消耗统计，用于后续的合规审计与成本对账。
 type AuditRecord struct {
-	Timestamp time.Time `json:"timestamp"`   // 事件发生时间
-	RequestID string    `json:"request_id"`  // 链路追踪 ID
+	Timestamp time.Time `json:"timestamp"`  // 事件发生时间
+	RequestID string    `json:"request_id"` // 链路追踪 ID
 	Event     string    `json:"event,omitempty"`
 	Status    string    `json:"status,omitempty"`
 	Reason    string    `json:"reason,omitempty"`

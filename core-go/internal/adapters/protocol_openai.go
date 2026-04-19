@@ -60,7 +60,7 @@ func (p *OpenAIProtocol) DecodeStreamChunk(line string) (*models.ChatCompletionS
 
 	// OpenAI 使用 "data: " 协议头作为数据分界。
 	dataStr := strings.TrimPrefix(line, "data: ")
-	
+
 	// 在 SSE 流中，[DONE] 表示服务端已完成所有内容推送，流即将关闭。
 	if dataStr == "[DONE]" {
 		return nil, true, nil

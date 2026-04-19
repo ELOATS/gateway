@@ -11,12 +11,12 @@ import (
 // DependencyStatus 描述一个运行时依赖的健康状态和失败策略。
 // 这些字段会同时被 /readyz、管理接口和 Prometheus 指标消费。
 type DependencyStatus struct {
-	Name        string `json:"name"`          // 组件名称（如 "redis", "python-sidecar"）
-	Required    bool   `json:"required"`      // 是否为核心依赖，如果不健康将导致网关整体进入 NotReady 状态
-	Healthy     bool   `json:"healthy"`       // 当前连接/执行是否正常
-	Status      string `json:"status"`        // 状态简述 (UP/DOWN/DEGRADED)
-	Reason      string `json:"reason,omitempty"` // 状态异常的详细原因
-	Version     string `json:"version,omitempty"` // 组件版本信息
+	Name        string `json:"name"`                   // 组件名称（如 "redis", "python-sidecar"）
+	Required    bool   `json:"required"`               // 是否为核心依赖，如果不健康将导致网关整体进入 NotReady 状态
+	Healthy     bool   `json:"healthy"`                // 当前连接/执行是否正常
+	Status      string `json:"status"`                 // 状态简述 (UP/DOWN/DEGRADED)
+	Reason      string `json:"reason,omitempty"`       // 状态异常的详细原因
+	Version     string `json:"version,omitempty"`      // 组件版本信息
 	FailureMode string `json:"failure_mode,omitempty"` // 预设的失败处理模式 (fail_open/fail_closed)
 }
 

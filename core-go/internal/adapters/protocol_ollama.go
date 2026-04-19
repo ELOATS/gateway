@@ -22,10 +22,10 @@ func (p *OllamaProtocol) AuthHeaders(apiKey string) http.Header {
 }
 
 type ollamaRequest struct {
-	Model    string           `json:"model"`
-	Messages []ollamaMessage  `json:"messages"`
-	Stream   bool             `json:"stream"`
-	Options  *ollamaOptions   `json:"options,omitempty"`
+	Model    string          `json:"model"`
+	Messages []ollamaMessage `json:"messages"`
+	Stream   bool            `json:"stream"`
+	Options  *ollamaOptions  `json:"options,omitempty"`
 }
 
 type ollamaMessage struct {
@@ -41,13 +41,13 @@ type ollamaOptions struct {
 }
 
 type ollamaResponse struct {
-	Model              string        `json:"model"`
-	CreatedAt          string        `json:"created_at"`
-	Message            ollamaMessage `json:"message"`
-	Done               bool          `json:"done"`
-	TotalDuration      int64         `json:"total_duration"`
-	PromptEvalCount    int           `json:"prompt_eval_count"`
-	EvalCount          int           `json:"eval_count"`
+	Model           string        `json:"model"`
+	CreatedAt       string        `json:"created_at"`
+	Message         ollamaMessage `json:"message"`
+	Done            bool          `json:"done"`
+	TotalDuration   int64         `json:"total_duration"`
+	PromptEvalCount int           `json:"prompt_eval_count"`
+	EvalCount       int           `json:"eval_count"`
 }
 
 func (p *OllamaProtocol) EncodeRequest(ctx context.Context, req *models.ChatCompletionRequest) ([]byte, http.Header, error) {

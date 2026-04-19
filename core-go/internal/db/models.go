@@ -37,7 +37,7 @@ type Quota struct {
 
 // ModelPrice 存储了不同模型在不同供应商处的单位定价信息。
 type ModelPrice struct {
-	ModelName   string    `gorm:"primaryKey;index"`          // 物理模型名称（如 gpt-4）
+	ModelName   string    `gorm:"primaryKey;index"`            // 物理模型名称（如 gpt-4）
 	InputPrice  float64   `gorm:"not null;type:decimal(10,6)"` // 每一千输入 tokens 的成本（USD/CNY）
 	OutputPrice float64   `gorm:"not null;type:decimal(10,6)"` // 每一千输出 tokens 的成本（USD/CNY）
 	UpdatedAt   time.Time // 上次调价时间，用于成本回溯
@@ -47,14 +47,13 @@ type ModelPrice struct {
 // 此表是系统财务对账、用户消费报表及成本归因的核心数据来源。
 type UsageLog struct {
 	ID           uint      `gorm:"primarykey"`
-	RequestID    string    `gorm:"index"`                  // 网关 RequestID，用于链路追踪
-	TenantID     uint      `gorm:"index"`                  // 请求所属租户
-	APIKeyID     uint      `gorm:"index"`                  // 发起请求的具体 Key ID
-	Model        string    `gorm:"index"`                  // 实际响应的远程物理模型名
-	Provider     string    `gorm:"index"`                  // 服务提供商 (openai/anthropic等)
-	InputTokens  int       `gorm:"not null"`               // 消耗的输入 Token
-	OutputTokens int       `gorm:"not null"`               // 消耗的输出 Token
+	RequestID    string    `gorm:"index"`                       // 网关 RequestID，用于链路追踪
+	TenantID     uint      `gorm:"index"`                       // 请求所属租户
+	APIKeyID     uint      `gorm:"index"`                       // 发起请求的具体 Key ID
+	Model        string    `gorm:"index"`                       // 实际响应的远程物理模型名
+	Provider     string    `gorm:"index"`                       // 服务提供商 (openai/anthropic等)
+	InputTokens  int       `gorm:"not null"`                    // 消耗的输入 Token
+	OutputTokens int       `gorm:"not null"`                    // 消耗的输出 Token
 	Cost         float64   `gorm:"not null;type:decimal(10,6)"` // 本次请求产生的实付成本（基于 ModelPrice 计算）
-	CreatedAt    time.Time `gorm:"index"`                  // 记录生成时间
+	CreatedAt    time.Time `gorm:"index"`                       // 记录生成时间
 }
-

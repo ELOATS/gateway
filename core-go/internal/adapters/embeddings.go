@@ -62,7 +62,7 @@ func (p *OpenAIEmbeddingProtocol) Embed(ctx context.Context, text string) ([]flo
 		return nil, err
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer " + p.APIKey)
+	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.Client.Do(httpReq)

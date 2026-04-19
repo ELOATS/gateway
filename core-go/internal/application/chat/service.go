@@ -242,7 +242,6 @@ func (s *Service) routeAndExecute(c *gin.Context, ctx context.Context, env *pipe
 	}
 	s.flow.RecordExecutionCompleted(env, nodeName, responseText, result.Response.Usage.PromptTokens, result.Response.Usage.CompletionTokens, result.Degraded, result.DegradeReason, statusLabel)
 
-
 	c.JSON(http.StatusOK, result.Response)
 }
 

@@ -47,3 +47,8 @@ logic-python/data/
 *.log
 *.test
 .gocache/
+
+.omc/
+.idea/
+.uv-cache/
+.agent

@@ -22,11 +22,11 @@ var (
 // 1. 并发安全：节点列表使用 atomic.Value 进行 Copy-on-Write (CoW) 存储，读操作无需加锁，适合高频访问的主链路。
 // 2. 灾备能力：集成 HealthTracker 进行健康监测，并支持二级 Model-level Fallback。
 type SmartRouter struct {
-	mu          sync.RWMutex          // 保护策略映射表的修改
-	nodes       atomic.Value          // 存储 []*ModelNode 的只读快照，加速并发读取
-	strategies  map[string]Strategy   // 已注册的可选路由策略集合
-	defaultName     string            // 无特殊需求时的默认策略名
-	Tracker         *HealthTracker    // 健康状态追踪计分器
+	mu              sync.RWMutex          // 保护策略映射表的修改
+	nodes           atomic.Value          // 存储 []*ModelNode 的只读快照，加速并发读取
+	strategies      map[string]Strategy   // 已注册的可选路由策略集合
+	defaultName     string                // 无特殊需求时的默认策略名
+	Tracker         *HealthTracker        // 健康状态追踪计分器
 	FallbackManager *FallbackChainManager // 模型降级关系链管理器
 }
 

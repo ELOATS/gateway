@@ -64,15 +64,15 @@ type RequestEnvelope struct {
 // PolicyDecision 描述策略引擎对请求的处理决策。
 // 包括是否允许通过、拦截的状态码、拦截原因，以及在通过时可能附带的脱敏 Prompt 或降级标记。
 type PolicyDecision struct {
-	Allow           bool            // 是否允许请求继续流转
-	StatusCode      int             // 拦截时的 HTTP 状态码
-	ErrorCode       string          // 拦截时的业务错误码
-	Message         string          // 返回给客户端的友好提示信息
-	Reason          string          // 内部审计用的详细拦截原因
-	SanitizedPrompt string          // 经过内容安全审计（如脱敏）后的 Prompt
-	RetryAfter      string          // 限流时建议的重试秒数
-	Degraded        bool            // 是否处于降级模式运行
-	DegradeReason   string          // 降级的具体原因（如缓存失效、安全服务不可用等）
+	Allow           bool   // 是否允许请求继续流转
+	StatusCode      int    // 拦截时的 HTTP 状态码
+	ErrorCode       string // 拦截时的业务错误码
+	Message         string // 返回给客户端的友好提示信息
+	Reason          string // 内部审计用的详细拦截原因
+	SanitizedPrompt string // 经过内容安全审计（如脱敏）后的 Prompt
+	RetryAfter      string // 限流时建议的重试秒数
+	Degraded        bool   // 是否处于降级模式运行
+	DegradeReason   string // 降级的具体原因（如缓存失效、安全服务不可用等）
 }
 
 // ExecutionPlan 定义了经过路由决策后的执行计划。
@@ -387,7 +387,7 @@ func (p *ChatPipeline) ExecuteSync(ctx context.Context, env *RequestEnvelope, pl
 		}
 
 		p.router.Tracker.RecordSuccess(node.Name, callDuration)
-		
+
 		// 响应侧安全审计
 		response, outputDecision := p.guardOutputResponse(ctx, env, node, resp)
 		if outputDecision != nil && !outputDecision.Allow {
@@ -914,6 +914,7 @@ func MarshalSSEData(resp *models.ChatCompletionStreamResponse) []byte {
 	}
 	return data
 }
+
 // pruneMessages 执行上下文窗口管理。
 // 当消息历史过长超过设定的 Threshold (如 4000 Tokens) 时，会从早期对话开始裁剪，
 // 以防止下游模型因 Context Window 超出上限而拒绝服务（500 错误）。
@@ -924,7 +925,7 @@ func (p *ChatPipeline) pruneMessages(ctx context.Context, env *RequestEnvelope) 
 
 	// 裁剪阈值。实际应用中应针对不同模型家族（GPT-4 vs Llama）动态调整。
 	limit := 4000
-	
+
 	// 循环裁剪直到 Token 总数降至安全范围内。始终保留 System Prompt 和最新的一轮问答。
 	for len(env.Request.Messages) > 2 {
 		fullText := messagesToText(env.Request.Messages)
@@ -938,7 +939,7 @@ func (p *ChatPipeline) pruneMessages(ctx context.Context, env *RequestEnvelope) 
 		if env.Request.Messages[0].Role == "system" {
 			startIdx = 1
 		}
-		
+
 		if len(env.Request.Messages) > startIdx+1 {
 			env.Request.Messages = append(env.Request.Messages[:startIdx], env.Request.Messages[startIdx+1:]...)
 			slog.Debug("pruned old message to fit context window", "request_id", env.RequestID, "current_count", count)

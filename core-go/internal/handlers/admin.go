@@ -14,7 +14,7 @@ import (
 )
 
 // AdminHandler 承载网关的运行时运维管理接口（控制面）。
-// 
+//
 // 设计原则：
 // 1. 非热路径：这些接口不参与业务请求处理，仅供运维查看系统快照与执行人工干预。
 // 2. 状态透传：通过 SystemStatus 与 SmartRouter 直接读取内存中的运行时指标与健康度。
@@ -84,7 +84,7 @@ func (h *AdminHandler) ListDependencies(c *gin.Context) {
 }
 
 // UpdateNodeWeight 允许运维人员在不停止服务的情况下动态调整节点权重。
-// 
+//
 // 实现原理：变更会通过 SmartRouter 的全量节点表快照更新（CoW 模式）生效，
 // 确保原子操作且不影响正在进行的请求。
 func (h *AdminHandler) UpdateNodeWeight(c *gin.Context) {

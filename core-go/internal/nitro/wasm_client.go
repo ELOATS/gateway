@@ -23,7 +23,7 @@ type wasmInstance struct {
 }
 
 // WasmNitroClient 是 Nitro 引擎的嵌入式 WebAssembly 实现版。
-// 
+//
 // 核心架构优势：
 // 1. 极致低延迟：由于代码直接在 Go 进程的线性内存上运行，省去了网络 RPC 开销。
 // 2. 隔离安全：即便 Rust 代码崩溃，也仅会影响 Wasm 虚拟机，不会导致 Go 宿主进程崩溃。

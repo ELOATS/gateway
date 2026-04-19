@@ -138,4 +138,3 @@ func (h *TenantAdminHandler) UpdateModelPrice(c *gin.Context) {
 
 	c.JSON(http.StatusOK, price)
 }
-

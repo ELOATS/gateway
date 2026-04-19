@@ -86,8 +86,8 @@ type anthropicStreamEvent struct {
 	Type  string `json:"type"`
 	Index int    `json:"index,omitempty"`
 	Delta *struct {
-		Type string         `json:"type,omitempty"`
-		Text string         `json:"text,omitempty"`
+		Type        string `json:"type,omitempty"`
+		Text        string `json:"text,omitempty"`
 		PartialJson string `json:"partial_json,omitempty"`
 	} `json:"delta,omitempty"`
 	ContentBlock *anthropicContent  `json:"content_block,omitempty"`

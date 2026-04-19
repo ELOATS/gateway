@@ -13,8 +13,8 @@ type DependencyContainer struct {
 	Dependencies  *dependencies.Facade // 后端服务门面（安全、计数等）
 	RedisClient   *redis.Client        // 分布式状态存储（限流、配额）
 	Config        *config.Config       // 全局静态配置
-	TenantManager db.TenantManager    // 租户信息存取
-	CostEngine    db.CostEngine       // 计费与审计
+	TenantManager db.TenantManager     // 租户信息存取
+	CostEngine    db.CostEngine        // 计费与审计
 }
 
 // RequestMetadata 存放从传输层（HTTP/gRPC）提取的元数据。

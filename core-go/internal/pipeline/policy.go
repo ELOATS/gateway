@@ -21,9 +21,9 @@ import (
 // Policy 定义了网关请求切面的通用策略接口。
 // 每一个策略都可以对请求进行评估、拦截、降级或内容脱敏。
 type Policy interface {
-	Name() string                                                    // 获取策略的唯一标识名
+	Name() string                                                       // 获取策略的唯一标识名
 	Evaluate(ctx context.Context, env *RequestEnvelope) *PolicyDecision // 执行具体的策略逻辑并返回决策
-	Close()                                                          // 优雅关闭策略实例，释放其持有的资源（如连接池、计时器）
+	Close()                                                             // 优雅关闭策略实例，释放其持有的资源（如连接池、计时器）
 }
 
 // RegisterPolicies 负责将所有内置策略类型注册到策略工厂中。

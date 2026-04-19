@@ -18,9 +18,9 @@ import (
 // 它允许系统管理员在不修改代码且不重新编译的前提下，通过配置文件动态接入与 OpenAI 协议高度兼容的新供应商。
 // 该配置描述了 API 基址、必要的静态头部，以及如何将授权令牌注入到特定的 HTTP 请求中。
 type PluginConfig struct {
-	Name           string            `yaml:"name"`           // 插件唯一标识名
-	BaseURL        string            `yaml:"base_url"`       // 目标服务的 API 基准地址
-	DefaultHeaders map[string]string `yaml:"headers"`        // 需要在每个请求中强制携带的静态头部
+	Name           string            `yaml:"name"`     // 插件唯一标识名
+	BaseURL        string            `yaml:"base_url"` // 目标服务的 API 基准地址
+	DefaultHeaders map[string]string `yaml:"headers"`  // 需要在每个请求中强制携带的静态头部
 	// RequestMapping 定义了标准请求到自定义供应商格式的映射模板。
 	RequestMapping struct {
 		HeaderTemplate map[string]string `yaml:"header_template"` // Header 模板，支持 {{.Key}} 占位符进行鉴权令牌注入

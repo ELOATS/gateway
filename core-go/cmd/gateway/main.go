@@ -64,7 +64,7 @@ func main() {
 	if tracker != nil {
 		defer tracker.Close()
 	}
-	
+
 	// 6. 依赖注入：将所有底层组件封装进 Handler 层
 	chatHandler := handlers.NewChatHandler(intelligenceClient, nitroClient, sr, tm, ce, rdb, cfg)
 	adminHandler := handlers.NewAdminHandler(sr, rdb, status)

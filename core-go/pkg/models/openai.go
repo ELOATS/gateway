@@ -14,7 +14,7 @@ type ChatCompletionRequest struct {
 	Temperature float64   `json:"temperature,omitempty"` // 采样温度：控制生成的随机性，范围通常在 0 到 2 之间
 	TopP        float64   `json:"top_p,omitempty"`       // 核采样：另一种控制多样性的方式
 	MaxTokens   int       `json:"max_tokens,omitempty"`  // 本次生成允许消耗的最大 Token 数量
-	Stop        []string  `json:"stop,omitempty"`         // 停止词序列：当模型输出这些词时将自动停止生成
+	Stop        []string  `json:"stop,omitempty"`        // 停止词序列：当模型输出这些词时将自动停止生成
 	Stream      bool      `json:"stream,omitempty"`      // 流式开关：启用后网关将返回 text/event-stream 格式的响应
 	Tools       []Tool    `json:"tools,omitempty"`       // 工具定义：用于 Agent 模式，允许模型调用函数或访问外部能力
 	ToolChoice  any       `json:"tool_choice,omitempty"` // 具体的工具选择策略（none, auto, 或指定 function）
@@ -28,15 +28,15 @@ type Tool struct {
 
 // FunctionCall 定义了一个符合 JSON Schema 规范的函数及其参数。
 type FunctionCall struct {
-	Name        string `json:"name"`                // 函数名，必须唯一
+	Name        string `json:"name"`                  // 函数名，必须唯一
 	Description string `json:"description,omitempty"` // 函数功能描述，模型会根据此描述判断是否调用
 	Parameters  any    `json:"parameters,omitempty"`  // 参数定义的 JSON Schema
 }
 
 // Message 描述了会话上下文中的单条消息单元。
 type Message struct {
-	Role      string     `json:"role"`              // 参与者角色：system (系统指令), user (用户), assistant (助手), tool (工具返回)
-	Content   any        `json:"content,omitempty"` // 消息负载：支持 string 纯文本或 []ContentPart 多模态混合内容
+	Role      string     `json:"role"`                 // 参与者角色：system (系统指令), user (用户), assistant (助手), tool (工具返回)
+	Content   any        `json:"content,omitempty"`    // 消息负载：支持 string 纯文本或 []ContentPart 多模态混合内容
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // 如果角色是 assistant，此处可能包含模型生成的工具调用请求
 }
 

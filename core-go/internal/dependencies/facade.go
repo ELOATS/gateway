@@ -45,12 +45,12 @@ type CacheOutcome struct {
 }
 
 // Facade 是网关内部复杂的依赖协调者。
-// 
+//
 // 设计方案：
 // 它封装了与 Nitro Wasm 核心、Python Sidecar (gRPC) 以及各 Cloud Provider 之间的交互。
 // 主要目的是将 Pipeline 逻辑与具体的底层实现（如本地 Wasm 执行还是远端 gRPC 调用）解耦。
 type Facade struct {
-	intelligenceClient pb.AiLogicClient // 远程智能服务（Python/Rust 容器）
+	intelligenceClient pb.AiLogicClient  // 远程智能服务（Python/Rust 容器）
 	nitroClient        nitro.NitroClient // 本地 Nitro 核心（通常基于 Wasm）
 	config             *config.Config
 }
