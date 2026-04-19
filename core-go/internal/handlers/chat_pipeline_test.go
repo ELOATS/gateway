@@ -129,7 +129,9 @@ func newPipelineTestHandler(t *testing.T, provider *providerSpy, ic pb.AiLogicCl
 		ic,
 		nc,
 		sr,
-		nil,
+		nil, // tm
+		nil, // ce
+		nil, // rdb
 		&config.Config{
 			APIKeys: []config.APIKeyEntry{
 				{Key: "sk-premium", Label: "premium"},

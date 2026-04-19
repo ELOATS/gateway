@@ -1,17 +1,17 @@
 package router
 
-// RouteContext 汇总路由决策所需的请求级信息。
-// HTTP 层会把原始请求压缩成这些特征，供策略统一评估。
+// RouteContext 汇总了路由决策所需的请求级特征信息。
+// 它的设计目的是解耦具体的协议层（如 HTTP 或 gRPC），将请求特征压缩为标准字段供路由器策略评估。
 type RouteContext struct {
-	RequestID    string            // 请求追踪 ID。
-	Model        string            // 客户端请求的模型名称。
-	PromptTokens int               // 预估的输入 Token 数。
-	UserTier     string            // 用户等级，例如 admin、free。
-	Headers      map[string]string // 可用于路由提示的请求头。
-	ExcludeNodes []string          // 本轮显式排除的节点。
+	RequestID    string            // 全链路追踪 ID
+	Model        string            // 客户端最初请求的目标模型标识符
+	PromptTokens int               // 预估或精确统计的输入 Token 总量
+	UserTier     string            // 用户层级标签（用于路由优先级划分）
+	Headers      map[string]string // 路由相关的元数据（如 X-Route-Strategy 提示）
+	ExcludeNodes []string          // 显式排除列表（通常用于重试时避开已故障节点）
 }
 
-// Header 安全读取请求头，避免调用方直接处理 nil map。
+// Header 安全地获取上下文中缓存的指定请求头信息。
 func (rc *RouteContext) Header(key string) string {
 	if rc.Headers == nil {
 		return ""

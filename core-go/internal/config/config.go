@@ -18,65 +18,82 @@ type APIKeyEntry struct {
 	DailyQuota int64
 }
 
-// PathConfig collects the filesystem resources used by the gateway.
+// PathConfig 汇总了网关运行时所需的所有文件系统资源路径。
 type PathConfig struct {
-	PolicyFile         string
-	AdapterDir         string
-	SensitiveRulesFile string
-	NitroWasmFile      string
-	AuditLogFile       string
+	PolicyFile         string // 动态策略配置文件路径 (policies.yaml)
+	AdapterDir         string // 供应商适配器配置目录
+	SensitiveRulesFile string // 敏感词过滤规则文件
+	NitroWasmFile      string // Nitro 安全引擎的 WASM 字节码文件
+	AuditLogFile       string // 审计合规日志文件
 }
 
-// Config 汇总当前网关启动所需的全部配置。
-// 其中 failure mode 字段用于显式区分安全关键依赖和可降级增强依赖。
+// Config 汇总了网关在生产环境稳定运行所需的全部配置参数。
+// 它通过单一入口管理端口监听、路径依赖、外部中间件地址及核心超时策略。
+//
+// 关键设计决策 —— 故障处理模式 (Failure Mode)：
+// 在分布式环境下，本网关采用了“可调节的安全边际”方案：
+// - fail_closed (强校验)：当安全引擎（如 Nitro) 不可用时，默认拦截所有请求，确保绝对合规。适用于高规范领域。
+// - fail_open_with_audit (高可用)：安全检查失败时允许请求透出，但强制进行背景审计，确保护核业务连续性。
 type Config struct {
-	Port  string
-	Paths PathConfig
+	Port  string     // 网关对外 HTTP 服务的监听端口
+	Paths PathConfig // 汇总文件系统中的策略文件、WASM 字节码及审计日志的路径
 
-	APIKeys        []APIKeyEntry
-	RateLimitQPS   float64
-	RateLimitBurst int
-	PythonAddr     string
-	RustAddr       string
-	RedisAddr      string
-	RedisPassword  string
-	RedisDB        int
-	RouteStrategy  string
-	HealthAlpha    float64
+	APIKeys        []APIKeyEntry // 基于配置文件的静态 API Key 映射（应急或开发场景使用）
+	RateLimitQPS   float64       // 网关节点的默认每秒最大请求数
+	RateLimitBurst int           // 突发流量容忍上限
+	PythonAddr     string        // 计算密集型任务（如语义缓存、提示词审计）的 gRPC 地址
+	RustAddr       string        // 高并发任务（如 Nitro Token 计数、正则审计）的 gRPC 地址
+	RedisAddr      string        // 分布式限流与临时状态同步的 Redis 连接串
+	RedisPassword  string        // Redis 认证凭据
+	RedisDB        int           // Redis 逻辑数据库索引
+	DatabaseDSN    string        // 主关系型数据库连接串（存储租户映射、价格、审计日志）
 
-	OpenAIApiKey  string
-	OpenAIURL     string
-	OpenAITimeout time.Duration
+	RouteStrategy string  // 默认负载均衡算法：支持 weighted (权重), latency (时延优先), cost (成本优先)
+	HealthAlpha   float64 // 健康评分系统的指数移动平均 (EWMA) 平滑因子
 
-	RequestTimeout         time.Duration
-	TokenCountTimeout      time.Duration
-	CacheTimeout           time.Duration
-	GuardrailNitroTimeout  time.Duration
-	GuardrailIntellTimeout time.Duration
+	OpenAIApiKey  string        // 默认的后端供应商认证 Key (若 Adapter 未指定)
+	OpenAIURL     string        // OpenAI 兼容接口的原始端点地址
+	OpenAITimeout time.Duration // 向供应商发起网络调用的硬性超时控制
 
+	// Rerank 服务配置：适配各种 RAG 流程的具体后端。
+	CohereApiKey string
+	CohereURL    string
+	JinaApiKey   string
+	JinaURL      string
+
+	// 超时管理策略：确保护核路径不被慢速连接或后端拥塞拖垮。
+	RequestTimeout         time.Duration // 单次请求从进入到返回的总生存期 (TTL)
+	TokenCountTimeout      time.Duration // 向 Nitro 服务请求分词计算的等待上限
+	CacheTimeout           time.Duration // 查询语义缓存的响应延迟上限
+	GuardrailNitroTimeout  time.Duration // 静态护栏检测的快速失败阈值
+	GuardrailIntellTimeout time.Duration // 智能护栏（大模型审计）的等待宽限
+
+	// gRPC 传输安全配置
 	GRPCBaseDelay      time.Duration
 	GRPCMaxDelay       time.Duration
-	GRPCEnableTLS      bool
-	GRPCServerName     string
-	GRPCCAFile         string
-	GRPCClientCertFile string
-	GRPCClientKeyFile  string
+	GRPCEnableTLS      bool   // 是否启用 gRPC 双向 TLS 认证
+	GRPCServerName     string // TLS 证书中的域名匹配标识
+	GRPCCAFile         string // 根证书授权文件路径
+	GRPCClientCertFile string // 客户端公钥证书
+	GRPCClientKeyFile  string // 客户端私钥
 
-	OTELCollectorAddr string
+	OTELCollectorAddr string // OpenTelemetry 事件/指标的流式收割机地址
 
-	TokenEstimationFactor int
-	MaxRetries            int
+	TokenEstimationFactor int // 在流式中断或供应商未返回 Usage 时，用于估算 Token 消耗的倍率系数
+	MaxRetries            int // 最大重试次数（受 RetryBudget 控制）
 
-	MaxConcurrentRequests  int
-	CircuitBreakerInterval time.Duration
+	MaxConcurrentRequests  int           // 单节点并发控制层级，通过信号量实施
+	CircuitBreakerInterval time.Duration // 熔断器自动尝试恢复的冷却时间窗
 
-	NitroFailureMode        string
-	PythonInputFailureMode  string
-	PythonOutputFailureMode string
-	PythonCacheFailureMode  string
+	// 故障自愈策略：明确系统在局部服务不可靠时的鲁棒性边界。
+	NitroFailureMode        string // Nitro 服务失联后的决策选择
+	PythonInputFailureMode  string // Python 输入审查失联后的决策选择
+	PythonOutputFailureMode string // Python 输出审查失联后的决策选择
+	PythonCacheFailureMode  string // Python 向量缓存失联后的决策选择
 }
 
-// LoadConfig 从环境变量和 .env 文件加载配置，并填充合理默认值。
+// LoadConfig 是网关配置的唯一入口。
+// 它从环境变量和 .env 文件加载配置，并填充合理默认值。
 func LoadConfig() *Config {
 	_ = godotenv.Load("../../.env", "../.env", ".env")
 
@@ -103,11 +120,16 @@ func LoadConfig() *Config {
 		RedisAddr:               getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:           getEnv("REDIS_PASSWORD", ""),
 		RedisDB:                 getIntEnv("REDIS_DB", 0),
+		DatabaseDSN:             getEnv("DATABASE_DSN", "gateway.db"),
 		OpenAIApiKey:            os.Getenv("OPENAI_API_KEY"),
 		RouteStrategy:           getEnv("ROUTE_STRATEGY", "weighted"),
 		HealthAlpha:             healthAlpha,
 		OpenAIURL:               getEnv("OPENAI_URL", "https://api.openai.com/v1/chat/completions"),
 		OpenAITimeout:           getDuration("OPENAI_TIMEOUT", 30*time.Second),
+		CohereApiKey:            os.Getenv("COHERE_API_KEY"),
+		CohereURL:               getEnv("COHERE_URL", "https://api.cohere.ai/v1/rerank"),
+		JinaApiKey:              os.Getenv("JINA_API_KEY"),
+		JinaURL:                 getEnv("JINA_URL", "https://api.jina.ai/v1/rerank"),
 		RequestTimeout:          getDuration("REQUEST_TIMEOUT", 15*time.Second),
 		TokenCountTimeout:       getDuration("TOKEN_COUNT_TIMEOUT", 2*time.Second),
 		CacheTimeout:            getDuration("CACHE_TIMEOUT", 500*time.Millisecond),
@@ -236,6 +258,9 @@ func resolvePathEnv(envKey, fallback string) string {
 	return resolvePath(fallback)
 }
 
+// resolvePath 采用层次化搜索逻辑尝试定位目标配置文件。
+// 它会从当前工作目录（CWD）出发，递归向上搜索 8 层父目录。
+// 这一设计极大简化了开发者在不同子目录下执行测试/调试命令时的路径噩梦。
 func resolvePath(candidate string) string {
 	if candidate == "" {
 		return ""

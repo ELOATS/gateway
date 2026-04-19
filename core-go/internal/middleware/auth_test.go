@@ -21,7 +21,7 @@ func TestAuthRequired(t *testing.T) {
 	setupRouter := func() *gin.Engine {
 		r := gin.New()
 		r.Use(RequestID())
-		r.Use(AuthRequired(keys))
+		r.Use(AuthRequired(nil, keys))
 		r.GET("/test", func(c *gin.Context) {
 			label, _ := c.Get("key_label")
 			rid, _ := c.Get(RequestIDKey)

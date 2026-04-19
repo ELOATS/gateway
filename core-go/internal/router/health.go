@@ -9,13 +9,13 @@ import (
 	"github.com/ai-gateway/core/internal/observability"
 )
 
-// CircuitState 描述节点熔断器的运行状态。
+// CircuitState 描述节点熔断器的当前运行状态。
 type CircuitState int
 
 const (
-	StateClosed   CircuitState = iota // 正常通信
-	StateOpen                         // 熔断打开，暂时拒绝流量
-	StateHalfOpen                     // 半开，允许少量流量验证恢复情况
+	StateClosed   CircuitState = iota // 正常通信状态：允许所有流量通过
+	StateOpen                         // 熔断打开状态：后端故障，暂时拦截该节点的所有请求
+	StateHalfOpen                     // 半开探测状态：允许极少量流量尝试访问，以验证后端是否已修复
 )
 
 func (s CircuitState) String() string {
@@ -31,22 +31,24 @@ func (s CircuitState) String() string {
 	}
 }
 
-// NodeHealth 记录单个模型节点的实时健康快照。
+// NodeHealth 记录单个物理模型节点的实时健康画像与性能指标。
 type NodeHealth struct {
-	AvgLatency          float64
-	ErrorRate           float64
-	LastSuccess         time.Time
-	LastFailure         time.Time
-	TotalRequests       int64
-	TotalErrors         int64
-	State               CircuitState
-	ConsecutiveFailures int
+	AvgLatency          float64      // 指数加权移动平均（EWMA）计算出的实时延迟，更敏锐地反映波动
+	ErrorRate           float64      // 窗口期内的历史错误率
+	LastSuccess         time.Time    // 最后一次执行成功的精准时间戳
+	LastFailure         time.Time    // 最后一次执行失败的时间戳（用于计算冷却期）
+	TotalRequests       int64        // 总请求计数
+	TotalErrors         int64        // 总错误计数
+	State               CircuitState // 当前熔断器状态
+	ConsecutiveFailures int          // 连续失败次数，用于触发熔断
 }
 
-// IsHealthy 根据熔断状态和最近错误率综合判断节点是否健康。
+// IsHealthy 综合评估节点当前的可用性。
+// 如果节点处于熔断打开状态，但在“观察冷却期”（30s）之后仍未成功，则暂时保持不健康。
+// 此外，如果样本数量充足（>5）且错误率超过 50%，也会被标记为不健康状态。
 func (nh *NodeHealth) IsHealthy() bool {
 	if nh.State == StateOpen {
-		// 打开状态下只在冷却时间过去后允许进入半开探测。
+		// 探测机制：只有在冷却时间过去后，路由逻辑才会给该节点一个“假健康”的假象，从而引导请求进入半开探测
 		if time.Since(nh.LastFailure) > 30*time.Second {
 			return true
 		}
@@ -59,12 +61,13 @@ func (nh *NodeHealth) IsHealthy() bool {
 	return true
 }
 
-// HealthTracker 维护所有节点的健康状态，并支持 EWMA 延迟和简单熔断逻辑。
+// HealthTracker 负责跨请求维护所有模型节点的健康画像。
+// 它采用 EWMA 算法平滑延迟波动，并管理一套简单的熔断与自愈状态机。
 type HealthTracker struct {
-	mu     sync.RWMutex
-	states map[string]*NodeHealth
-	alpha  float64
-	cancel context.CancelFunc
+	mu     sync.RWMutex           // 读写锁，保护状态映射表及其指标更新
+	states map[string]*NodeHealth // 节点名称到健康画像的映射
+	alpha  float64                // EWMA 衰减因子（0.0-1.0），越接近 1 则对最近一次请求的耗时越敏感
+	cancel context.CancelFunc     // 用于优雅停止后台自愈任务
 }
 
 // NewHealthTracker 创建健康追踪器并开启自愈背景协程。
@@ -89,7 +92,7 @@ func (ht *HealthTracker) Close() {
 	}
 }
 
-// proactiveSelfHealing 定期扫描熔断节点并尝试恢复。
+// proactiveSelfHealing 启动后台监控，负责将“冷却到期”的熔断节点自动迁移到半开探测状态。
 func (ht *HealthTracker) proactiveSelfHealing(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -117,7 +120,8 @@ func (ht *HealthTracker) proactiveSelfHealing(ctx context.Context) {
 	}
 }
 
-// RecordSuccess 记录一次成功调用，并更新延迟、错误率和熔断状态。
+// RecordSuccess 记录一次成功的业务调用，并更新统计指标。
+// 任何一次成功都会使得节点立即退出熔断状态，回归正常（Closed）。
 func (ht *HealthTracker) RecordSuccess(node string, latency time.Duration) {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
@@ -134,6 +138,7 @@ func (ht *HealthTracker) RecordSuccess(node string, latency time.Duration) {
 		observability.CircuitBreakerChanges.WithLabelValues(node, oldState+"->Closed").Inc()
 	}
 
+	// 采用 EWMA （指数加权移动平均）计算平均延迟
 	latencySeconds := latency.Seconds()
 	if h.AvgLatency == 0 {
 		h.AvgLatency = latencySeconds

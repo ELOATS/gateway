@@ -16,9 +16,12 @@ class DetectionResult:
 
 
 class PromptInjectionDetector:
-    """轻量 Prompt Injection 检测器。
-
-    先做规则和关键词拦截，再在有 embedding 能力时补一层语义相似度判断。
+    """提示词注入（Prompt Injection）检测器。
+    
+    设计意图：采用多层防御（Defense in Depth）策略，分阶段过滤不同复杂度的攻击载荷：
+    1. 第一层（静态规则）：利用高性能正则表达式（Regex）识别常见的指令覆盖（Override）模式。
+    2. 第二层（多组关键词）：识别高风险词汇组合，通过加权分值降低误报。
+    3. 第三层（语义相似度）：利用 Embedding 向量与已知的恶意载荷原型（Prototypes）进行余弦相似度对比，发现变体。
     """
 
     def __init__(
@@ -53,9 +56,10 @@ class PromptInjectionDetector:
         if not normalized:
             return DetectionResult(safe=True)
 
-        # 采用加权评分逻辑，提高检测鲁棒性
-        # Regex 命中基础分 0.5，关键词命中的组数每组 0.2
-        # 若总分超过 0.8 则判定为攻击
+        # 智能加权逻辑：
+        # - 正则表达式（Regex）命中基础分：0.5（强信号）
+        # - 关键词组命中加分：每组命中 0.2
+        # - 判定阈值：>= 0.8 则认为存在实质性注入风险。
         total_score = 0.0
 
         for rule in self._regex_rules:
@@ -77,6 +81,7 @@ class PromptInjectionDetector:
                 score=min(total_score, 1.0),
             )
 
+        # 第三种维度：语义向量匹配。覆盖通过语义等效但表现形式不同的攻击变体。
         if self._embed_fn and self._prototype_vectors:
             prompt_vector = self._embed_fn([prompt])[0]
             score = max(

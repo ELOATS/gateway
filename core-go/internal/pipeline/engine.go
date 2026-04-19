@@ -17,7 +17,7 @@ type PolicyFactory func(deps *DependencyContainer, config map[string]any) (Polic
 
 var registry = make(map[string]PolicyFactory)
 
-// RegisterPolicy 允许外部（例如在 policy.go 中）注册可供引擎使用的策略类型。
+// RegisterPolicy 用于注册策略工厂函数，方便引擎根据 YAML 配置动态实例化策略。
 func RegisterPolicy(name string, factory PolicyFactory) {
 	registry[name] = factory
 }
@@ -34,14 +34,15 @@ type EngineConfig struct {
 	Policies []PolicyConfig `yaml:"policies"`
 }
 
-// PolicyEngine 实现了基于声明式配置的策略决策。
+// PolicyEngine 策略引擎核心，负责解析声明式 YAML 配置并管理策略执行链。
+// 支持热加载，能够根据文件变动自动更新执行策略。
 type PolicyEngine struct {
-	mu          sync.RWMutex
-	chain       []Policy
-	configPath  string
-	deps        *DependencyContainer
-	lastModTime time.Time
-	cancel      context.CancelFunc
+	mu          sync.RWMutex         // 保护策略链在热加载时的并发安全
+	chain       []Policy             // 当前处于活跃状态的策略执行链
+	configPath  string               // 策略配置文件的磁盘路径
+	deps        *DependencyContainer // 全局依赖容器
+	lastModTime time.Time            // 上次配置文件修改时间，用于热加载嗅探
+	cancel      context.CancelFunc   // 用于优雅停止后台监听任务
 }
 
 // NewPolicyEngine 从文件路径加载并初始化策略引擎，并开启自动热加载。
@@ -106,7 +107,9 @@ func (e *PolicyEngine) reload() error {
 	e.lastModTime = info.ModTime()
 	e.mu.Unlock()
 
-	// 异步延迟关闭旧策略，给当前活着的请求（尤其是流式请求）一个缓冲期
+	// 异步延迟关闭旧策略实例。
+	// 给予 3 秒的缓冲期是为了让当前已经在处理中（尤其是流式推理）的请求能够平滑完成，
+	// 避免因策略实例立即销毁导致资源泄漏或请求中断。
 	go func(old []Policy) {
 		time.Sleep(3 * time.Second)
 		for _, p := range old {
@@ -119,7 +122,8 @@ func (e *PolicyEngine) reload() error {
 	return nil
 }
 
-// watch 定期检查配置文件变化进行热加载。
+// watch 启动后台监控协程，定期轮询配置文件的修改时间。
+// 这使得管理员通过修改 policies.yaml 即可在不停机的情况下动态调整网关安全与限流行为。
 func (e *PolicyEngine) watch(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -217,7 +221,7 @@ func (e *PolicyEngine) GetChainNames() []string {
 	return names
 }
 
-// Close gracefully stops the background watcher config and policy routines.
+// Close 优雅停止策略引擎及其关联的所有后台任务。
 func (e *PolicyEngine) Close() {
 	if e.cancel != nil {
 		e.cancel()

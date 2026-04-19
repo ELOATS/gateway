@@ -11,7 +11,8 @@ import (
 	"github.com/ai-gateway/core/pkg/models"
 )
 
-// OpenAIProtocol 实现了将网关标准请求与 OpenAI 兼容格式相互转换的逻辑。
+// OpenAIProtocol 实现了官方 OpenAI Chat API 的数据互转逻辑。
+// 由于它是网关的默认协议，许多兼容 OpenAI 格式的其他服务（如 DeepSeek, Qwen）也可以复用此类。
 type OpenAIProtocol struct{}
 
 func (p *OpenAIProtocol) AuthHeaders(apiKey string) http.Header {
@@ -57,7 +58,10 @@ func (p *OpenAIProtocol) DecodeStreamChunk(line string) (*models.ChatCompletionS
 		return nil, false, nil
 	}
 
+	// OpenAI 使用 "data: " 协议头作为数据分界。
 	dataStr := strings.TrimPrefix(line, "data: ")
+
+	// 在 SSE 流中，[DONE] 表示服务端已完成所有内容推送，流即将关闭。
 	if dataStr == "[DONE]" {
 		return nil, true, nil
 	}

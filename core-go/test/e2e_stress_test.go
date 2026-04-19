@@ -63,7 +63,7 @@ func BenchmarkFullGatewayStack(b *testing.B) {
 	}
 	sr := router.NewSmartRouter([]*router.ModelNode{mockNode}, router.NewHealthTracker(0.1), "fixed")
 
-	handler := handlers.NewChatHandler(ic, nitroClient, sr, rdb, cfg)
+	handler := handlers.NewChatHandler(ic, nitroClient, sr, nil, nil, rdb, cfg)
 
 	// 2. Prepare Request
 	reqBody, _ := json.Marshal(models.ChatCompletionRequest{

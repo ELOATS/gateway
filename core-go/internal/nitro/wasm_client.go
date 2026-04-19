@@ -10,23 +10,29 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-// wasmInstance 持有一个具体的 Wasm 模块实例及其导出函数句柄。
-// 之所以拆出这个结构，是为了让实例池复用时不必反复查找导出函数。
+// wasmInstance 持有一个具体的 Wasm 模块实例及其导出函数的底层句柄。
+// 设计决策：通过拆分此结构，实现在实例池（Pool）复用时无需重新执行昂贵的导数查找（ExportedFunction）操作。
 type wasmInstance struct {
 	module      api.Module
-	malloc      api.Function
-	freePtr     api.Function
-	setRules    api.Function
-	countTokens api.Function
-	checkInput  api.Function
-	freeString  api.Function
+	malloc      api.Function // Wasm 侧的内存分配函数
+	freePtr     api.Function // Wasm 侧的内存回收函数
+	setRules    api.Function // 敏感词规则注入函数
+	countTokens api.Function // Token 统计逻辑函数
+	checkInput  api.Function // 输入脱敏检测函数
+	freeString  api.Function // 释放 Wasm 侧生成的 CString 函数
 }
 
+// WasmNitroClient 是 Nitro 引擎的嵌入式 WebAssembly 实现版。
+//
+// 核心架构优势：
+// 1. 极致低延迟：由于代码直接在 Go 进程的线性内存上运行，省去了网络 RPC 开销。
+// 2. 隔离安全：即便 Rust 代码崩溃，也仅会影响 Wasm 虚拟机，不会导致 Go 宿主进程崩溃。
+// 3. 高负载自解耦：通过实例池（Pool）管理 Wasm 实例，支持高并发下的计算密集型任务。
 type WasmNitroClient struct {
-	runtime wazero.Runtime
-	code    wazero.CompiledModule
-	pool    chan *wasmInstance
-	rules   string
+	runtime wazero.Runtime        // Wazero 运行时环境
+	code    wazero.CompiledModule // 预编译的 Wasm 二进制代码
+	pool    chan *wasmInstance    // 实例复用池，减少重入时的初始化开销
+	rules   string                // 初始化时注入的全局敏感词规则
 }
 
 // NewWasmNitroClient 加载 Wasm 模块并预热一个实例。
@@ -108,7 +114,9 @@ func newWasmInstance(ctx context.Context, runtime wazero.Runtime, code wazero.Co
 	return inst, nil
 }
 
-// syncRulesInst 把当前规则表写入指定实例，确保每个实例都持有一致的脱敏规则。
+// syncRulesInst 将全局敏感词规则同步至目标 Wasm 实例。
+// 设计决策：每个 Wasm 实例拥有独立的线性内存。因此在创建新实例或更新规则时，
+// 必须通过内存拷贝将规则字符串显式推送至 Wasm 内部的 Rust 虚拟机中。
 func syncRulesInst(ctx context.Context, inst *wasmInstance, rules string) error {
 	ptr, sz, err := copyStringToWasm(ctx, inst, rules)
 	if err != nil {
@@ -171,7 +179,12 @@ func getString(inst *wasmInstance, offset uint64) (string, error) {
 	return string(bytes), nil
 }
 
-// copyStringToWasm 在 Wasm 侧分配内存并写入 Go 字符串。
+// copyStringToWasm 是 Go 与 Wasm 跨语境通信的关键纽带。
+//
+// 逻辑流程：
+// 1. 调用 Wasm 侧的 malloc 在其线性内存堆中申请一段空间。
+// 2. 获取 Wasm 内存视图，直接将 Go 的字节切片（带 NUL 结束符）写入该地址。
+// 3. 返回 Wasm 内部地址指针，供 Rust 代码作为 CString 处理。
 func copyStringToWasm(ctx context.Context, inst *wasmInstance, s string) (uint64, uint32, error) {
 	size := uint64(len(s) + 1)
 

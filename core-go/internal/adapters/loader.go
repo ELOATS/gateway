@@ -9,12 +9,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Registry 维护了所有已加载的动态适配器插件及其配置。
 type Registry struct {
-	Plugins map[string]PluginConfig
+	Plugins map[string]PluginConfig // 已注册的插件映射表
 }
 
+// GlobalRegistry 提供了一个单例入口，用于全局存取已动态加载的适配器。
 var GlobalRegistry = &Registry{Plugins: make(map[string]PluginConfig)}
 
+// LoadPlugins 扫描指定目录下的所有 YAML 文件，并将其解析为动态适配器配置。
+// 设计功能：支持自动纠错，如果目标目录不存在则尝试自动创建。
 func (r *Registry) LoadPlugins(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -60,6 +64,7 @@ func (r *Registry) LoadPlugins(dir string) error {
 	return nil
 }
 
+// GetPlugin 根据名称从内存注册表中检索已加载的插件配置。
 func (r *Registry) GetPlugin(name string) (PluginConfig, bool) {
 	p, ok := r.Plugins[name]
 	return p, ok
